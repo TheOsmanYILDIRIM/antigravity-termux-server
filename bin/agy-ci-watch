@@ -1,0 +1,138 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# ==============================================================================
+# AGY Autonomous CI/CD Watchdog & Self-Healing Loop
+# Avenox Doktrini: Düşük Pil & Termal Koruma (nice -n 15, taskset -c 0-5)
+# ==============================================================================
+
+REPO_DIR="${1:-$(pwd)}"
+cd "$REPO_DIR" || exit 1
+
+# Git ve GitHub CLI kontrolü
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "❌ Hata: $REPO_DIR geçerli bir git deposu değil."
+    exit 1
+fi
+
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+COMMIT=$(git rev-parse --short HEAD)
+REPO_NAME=$(git remote get-url origin 2>/dev/null | sed -E 's/.*github\.com[:\/](.+)\.git/\1/')
+
+echo "=================================================="
+echo "⚡ AGY CI/CD Watchdog Başlatıldı"
+echo "📂 Proje  : $REPO_NAME"
+echo "🌿 Dal    : $BRANCH (Commit: $COMMIT)"
+echo "=================================================="
+
+MAX_HEAL_ATTEMPTS=3
+heal_attempt=0
+
+while [ $heal_attempt -lt $MAX_HEAL_ATTEMPTS ]; do
+    CURRENT_COMMIT=$(git rev-parse HEAD)
+    SHORT_COMMIT=$(git rev-parse --short HEAD)
+
+    echo "🔍 [$SHORT_COMMIT] GitHub Actions iş akışları taranıyor..."
+    
+    # En son tetiklenen iş akışını bulana kadar kısa bekleme (push sonrası gecikme için)
+    RUNS=""
+    for retry in {1..6}; do
+        RUNS=$(gh run list -b "$BRANCH" -L 5 --json databaseId,status,conclusion,workflowName,headSha 2>/dev/null)
+        MATCHING_RUNS=$(echo "$RUNS" | jq -c "[.[] | select(.headSha == \"$CURRENT_COMMIT\")]" 2>/dev/null)
+        if [ -n "$MATCHING_RUNS" ] && [ "$MATCHING_RUNS" != "[]" ]; then
+            break
+        fi
+        sleep 4
+    done
+
+    if [ -z "$MATCHING_RUNS" ] || [ "$MATCHING_RUNS" = "[]" ]; then
+        echo "⚠️ Bu commit ($SHORT_COMMIT) için henüz GitHub Actions iş akışı tespit edilmedi."
+        echo "💡 10 saniye sonra tekrar kontrol edilecek..."
+        sleep 10
+        continue
+    fi
+
+    echo "📡 İzlenen İş Akışları:"
+    echo "$MATCHING_RUNS" | jq -r '.[] | "  • " + .workflowName + " (ID: " + (.databaseId|tostring) + ") -> " + .status'
+
+    # İş akışlarının tamamlanmasını bekleme döngüsü (Optimum 20s aralık)
+    has_failure=0
+    failed_run_id=""
+    failed_workflow=""
+
+    while true; do
+        RUNS=$(gh run list -b "$BRANCH" -L 5 --json databaseId,status,conclusion,workflowName,headSha 2>/dev/null)
+        MATCHING_RUNS=$(echo "$RUNS" | jq -c "[.[] | select(.headSha == \"$CURRENT_COMMIT\")]" 2>/dev/null)
+        
+        all_completed=1
+        
+        # JSON dizisini oku
+        while IFS= read -r item; do
+            [ -z "$item" ] && continue
+            status=$(echo "$item" | jq -r '.status')
+            conclusion=$(echo "$item" | jq -r '.conclusion')
+            wf_name=$(echo "$item" | jq -r '.workflowName')
+            run_id=$(echo "$item" | jq -r '.databaseId')
+
+            if [ "$status" != "completed" ]; then
+                all_completed=0
+            else
+                if [ "$conclusion" = "failure" ] || [ "$conclusion" = "timed_out" ]; then
+                    has_failure=1
+                    failed_run_id="$run_id"
+                    failed_workflow="$wf_name"
+                fi
+            fi
+        done < <(echo "$MATCHING_RUNS" | jq -c '.[]')
+
+        if [ $all_completed -eq 1 ]; then
+            break
+        fi
+
+        echo -n "."
+        sleep 20
+    done
+    echo ""
+
+    if [ $has_failure -eq 0 ]; then
+        echo "=================================================="
+        echo "🎉 TEBRİKLER! [$SHORT_COMMIT] Tüm CI/CD iş akışları BAŞARIYLA tamamlandı!"
+        echo "📦 APK Release ve kontroller eksiksiz üretildi."
+        echo "=================================================="
+        exit 0
+    else
+        heal_attempt=$((heal_attempt + 1))
+        echo "=================================================="
+        echo "🚨 CI/CD BAŞARISIZ OLDU: $failed_workflow (Run ID: $failed_run_id)"
+        echo "🔄 OTONOM KENDİNİ İYİLEŞTİRME BAŞLATILIYOR (Deneme: $heal_attempt/$MAX_HEAL_ATTEMPTS)..."
+        echo "=================================================="
+
+        # Hata loglarını çıkar
+        LOG_FILE="$REPO_DIR/.ci_failure_$failed_run_id.log"
+        gh run view "$failed_run_id" --log-failed > "$LOG_FILE" 2>/dev/null
+        LOG_SNIPPET=$(grep -E 'e: |error:|Compilation error|FAILED' "$LOG_FILE" | head -n 40)
+        [ -z "$LOG_SNIPPET" ] && LOG_SNIPPET=$(tail -n 40 "$LOG_FILE")
+
+        PROMPT="[OTONOM CI-WATCHDOG KENDİNİ İYİLEŞTİRME GÖREVİ]
+GitHub Actions derleme hatası tespit edildi.
+Depo: $REPO_DIR
+İş Akışı: $failed_workflow (Run ID: $failed_run_id)
+Hata Özeti:
+$LOG_SNIPPET
+
+GÖREVLER:
+1. Hata loglarını ve ilgili kaynak kodları incele.
+2. Sorunu çözmek için gerekli kod/yapılandırma düzeltmesini yap.
+3. Değişiklikleri git commit yap ve 'git push origin $BRANCH' ile GitHub'a gönder.
+Sadece kesin ve temiz çözümü uygula."
+
+        # Termal koruma ile AGY agent'ını tetikle
+        nice -n 15 taskset -c 0-5 agy -p "$PROMPT" \
+            --dangerously-skip-permissions \
+            --model gemini-3.8-flash-medium
+
+        echo "⏳ Düzeltme push'u sonrası yeni döngüye geçiliyor..."
+        sleep 10
+    fi
+done
+
+echo "⚠️ Azami iyileştirme deneme sınırına ($MAX_HEAL_ATTEMPTS) ulaşıldı."
+exit 1
