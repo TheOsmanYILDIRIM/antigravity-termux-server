@@ -1638,15 +1638,32 @@ const server = http.createServer((req, res) => {
 
         let attachmentNotice = "";
         if (attachments.length > 0) {
-          const fileRefs = attachments.map(a => {
+          const unreferencedAttachments = [];
+          attachments.forEach((a, idx) => {
+            const num = idx + 1;
             const safePath = a.path || path.join(UPLOADS_DIR, a.name);
-            return "[Eklenen Dosya/Resim: " + safePath + "] (Adı: " + a.name + ")";
-          }).join("\n");
+            const tagRegex = new RegExp(`\\[(image|resim|görsel|dosya|file|doc|ek)[-_]?${num}\\]`, "gi");
+            
+            if (tagRegex.test(prompt)) {
+              prompt = prompt.replace(tagRegex, `[Ek Görsel/Dosya #${num} (${a.name}): ${safePath}]`);
+            } else if (prompt.includes(safePath) || (a.name && prompt.includes(a.name))) {
+              // Zaten metin içinde dosya yolundan veya adından açıkça bahsedilmiş
+            } else {
+              unreferencedAttachments.push(a);
+            }
+          });
 
-          attachmentNotice = "\n\nKullanıcının mesaja eklediği dosya ve görseller:\n" + fileRefs + "\nLütfen ekteki bu dosya/görselleri analiz ederek yanıt verin.";
+          if (unreferencedAttachments.length > 0) {
+            const fileRefs = unreferencedAttachments.map(a => {
+              const safePath = a.path || path.join(UPLOADS_DIR, a.name);
+              return "[Eklenen Dosya/Resim: " + safePath + "] (Adı: " + a.name + ")";
+            }).join("\n");
+
+            attachmentNotice = "\n\nKullanıcının mesaja eklediği diğer dosya ve görseller:\n" + fileRefs + "\nLütfen ekteki bu dosya/görselleri de analiz ederek yanıt verin.";
+          }
         }
 
-        const fullPromptForAgy = prompt + attachmentNotice;
+        const fullPromptForAgy = (prompt + attachmentNotice).trim();
 
         if (currentSession.messages.length === 0) {
           currentSession.title = prompt.length > 35 ? prompt.slice(0, 35) + "…" : (prompt || "Ekli Dosya Analizi");
