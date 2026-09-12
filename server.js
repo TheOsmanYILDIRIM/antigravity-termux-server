@@ -1483,11 +1483,18 @@ const server = http.createServer(async (req, res) => {
   // List Conversations (Direct from Brain Cache - Non-blocking)
   if (pathname === "/api/conversations" && req.method === "GET") {
     const list = await getBrainConversations();
+    const activeConvId = currentSession.conversationId || currentSession.id;
+    const enrichedList = list.map(c => ({
+      ...c,
+      isGenerating: Boolean(currentSession.isGenerating && (activeConvId === c.id))
+    }));
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({
       status: "ok",
-      currentSessionId: currentSession.conversationId || currentSession.id,
-      conversations: list
+      currentSessionId: activeConvId,
+      activeGeneratingId: currentSession.isGenerating ? activeConvId : null,
+      isGenerating: currentSession.isGenerating,
+      conversations: enrichedList
     }));
     return;
   }
@@ -1745,8 +1752,10 @@ const server = http.createServer(async (req, res) => {
       } catch (e) {}
       activeChildProcess = null;
     }
+    const activeConvId = currentSession.conversationId || currentSession.id;
     currentSession.isGenerating = false;
-    broadcastSSE("stopped", { message: "İşlem durduruldu." });
+    broadcastSSE("generating_done", { conversationId: activeConvId, isGenerating: false });
+    broadcastSSE("stopped", { message: "İşlem durduruldu.", conversationId: activeConvId });
 
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ status: "ok", message: "İşlem anında durduruldu." }));
@@ -1816,7 +1825,21 @@ const server = http.createServer(async (req, res) => {
           }
         }
 
-        const fullPromptForAgy = (prompt + attachmentNotice).trim();
+        const clientType = (data.client || "antigravity-android").trim();
+        const isMobileClient = clientType.includes("android") || clientType.includes("mobile") || clientType === "antigravity-android";
+
+        let clientContextInstruction = "";
+        if (isMobileClient) {
+          clientContextInstruction = `[Ortam Bilgisi & İstemci: Antigravity Android Mobil Uygulaması]
+[Mobil Önizleme ve Formatlama Kuralları:
+1. Dosya ve Kod Bağlantıları: Referans verilen, düzenlenen veya oluşturulan her dosya/kod için mutlaka [dosya_adi.uzanti](file:///tam/dosya/yolu) formatında tıklanabilir bağlantı verin (örnek: [server.js](file:///data/data/com.termux/files/home/antigravity-termux-server/server.js)). Kullanıcı bağlantıya dokunduğunda mobil uygulamada dahili kod önizleyicisi ve editörü açılır.
+2. Görseller & Şemalar: Oluşturulan, düzenlenen veya analiz edilen görselleri doğrudan ![Görsel Açıklaması](file:///tam/dosya/yolu.png) veya ![Görsel Açıklaması](/tam/dosya/yolu.png) formatında Markdown görsel etiketi olarak verin. Mobil uygulama bunları sohbet içinde interaktif önizleme kartı ve tam ekran yakınlaştırılabilir galeri olarak gösterir.
+3. Uyarı & Vurgu Kutuları: GitHub callout formatını kullanın (> [!NOTE], > [!TIP], > [!IMPORTANT], > [!WARNING], > [!CAUTION]). Mobil uygulama bunları ikonlu ve renkli kutular olarak render eder.
+4. Tablolar & Kod Blokları: Verileri Markdown pipe tabloları (| Başlık 1 | Başlık 2 |) ile, kod parçalarını ise dil etiketli (\`\`\`kotlin, \`\`\`javascript, \`\`\`bash vb.) fenced block olarak sunun.
+5. Net & Mobil Uyumlu Çıktı: Mobil ekran okunabilirliği için gereksiz dolgu metinlerinden kaçının, net ve yapılandırılmış bilgi sunun.]\n\n`;
+        }
+
+        const fullPromptForAgy = (clientContextInstruction + prompt + attachmentNotice).trim();
 
         if (currentSession.messages.length === 0) {
           currentSession.title = prompt.length > 35 ? prompt.slice(0, 35) + "…" : (prompt || "Ekli Dosya Analizi");
@@ -1840,6 +1863,12 @@ const server = http.createServer(async (req, res) => {
         currentSession.messages.push(botMessage);
         currentSession.isGenerating = true;
         manualStop = false;
+
+        const currentActiveConvId = currentSession.conversationId || currentSession.id;
+        broadcastSSE("generating_start", {
+          conversationId: currentActiveConvId,
+          isGenerating: true
+        });
 
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ status: "accepted", prompt }));
@@ -1964,6 +1993,7 @@ const server = http.createServer(async (req, res) => {
                     currentSession.conversationId = eventObj.conversation_id;
                     currentSession.id = eventObj.conversation_id;
                     broadcastSSE("init", { conversationId: eventObj.conversation_id });
+                    broadcastSSE("generating_start", { conversationId: eventObj.conversation_id, isGenerating: true });
                   }
                 } else if (eventObj.event === "step_update") {
                   const update = eventObj.step_update;
@@ -1974,7 +2004,8 @@ const server = http.createServer(async (req, res) => {
                     botMessage.content += update.text_delta;
                     broadcastSSE("chunk", {
                       text_delta: update.text_delta,
-                      full_content: botMessage.content
+                      full_content: botMessage.content,
+                      conversationId: currentSession.conversationId || currentSession.id
                     });
                   }
 
@@ -2007,7 +2038,10 @@ const server = http.createServer(async (req, res) => {
                       botMessage.tools.push(toolData);
                     }
 
-                    broadcastSSE("tool_update", { tool: toolData });
+                    broadcastSSE("tool_update", {
+                      tool: toolData,
+                      conversationId: currentSession.conversationId || currentSession.id
+                    });
                   }
 
                   if (update.usage) {
@@ -2023,7 +2057,8 @@ const server = http.createServer(async (req, res) => {
                     hasStreamedChunk = true;
                     broadcastSSE("chunk", {
                       text_delta: formatted,
-                      full_content: formatted
+                      full_content: formatted,
+                      conversationId: currentSession.conversationId || currentSession.id
                     });
                     broadcastSSE("usage_update", { usage: cachedUsageMetrics });
                   } else if (cmd && (cmd.name === "model" || cmd.name === "models")) {
@@ -2033,7 +2068,8 @@ const server = http.createServer(async (req, res) => {
                     hasStreamedChunk = true;
                     broadcastSSE("chunk", {
                       text_delta: formatted,
-                      full_content: formatted
+                      full_content: formatted,
+                      conversationId: currentSession.conversationId || currentSession.id
                     });
                   } else if (cmd && cmd.name === "help" && cmd.data) {
                     const formatted = formatHelpMarkdown(cmd.data);
@@ -2041,7 +2077,8 @@ const server = http.createServer(async (req, res) => {
                     hasStreamedChunk = true;
                     broadcastSSE("chunk", {
                       text_delta: formatted,
-                      full_content: formatted
+                      full_content: formatted,
+                      conversationId: currentSession.conversationId || currentSession.id
                     });
                   } else if (cmd && cmd.data) {
                     const formatted = typeof cmd.data === "string" ? cmd.data : "```json\n" + JSON.stringify(cmd.data, null, 2) + "\n```";
@@ -2049,7 +2086,8 @@ const server = http.createServer(async (req, res) => {
                     hasStreamedChunk = true;
                     broadcastSSE("chunk", {
                       text_delta: formatted,
-                      full_content: formatted
+                      full_content: formatted,
+                      conversationId: currentSession.conversationId || currentSession.id
                     });
                   }
                 } else if (eventObj.event === "result") {
@@ -2100,11 +2138,12 @@ const server = http.createServer(async (req, res) => {
               broadcastSSE("auth_required", {
                 authUrl: detectedUrl,
                 error: "Google oturumu gerekiyor. Lütfen açılan tarayıcıda yetkilendirip kodu kopyalayın.",
-                isWaitingCode: true
+                isWaitingCode: true,
+                conversationId: currentSession.conversationId || currentSession.id
               });
             }
 
-            broadcastSSE("stderr", { text: stderrText });
+            broadcastSSE("stderr", { text: stderrText, conversationId: currentSession.conversationId || currentSession.id });
           });
 
           child.on("error", (err) => {
@@ -2112,14 +2151,16 @@ const server = http.createServer(async (req, res) => {
             if (diagRssTimer) clearInterval(diagRssTimer);
             if (authWaitingChildProcess === child) authWaitingChildProcess = null;
             activeChildProcess = null;
+            const activeConvId = currentSession.conversationId || currentSession.id;
             currentSession.isGenerating = false;
+            broadcastSSE("generating_done", { conversationId: activeConvId, isGenerating: false });
             try {
               fs.appendFileSync("/data/data/com.termux/files/home/agy_diag.log",
                 `[${new Date().toISOString()}] ERR ${err.message} mem=${Math.round(process.memoryUsage().rss/1048576)}MB\n`);
             } catch (e) {}
             botMessage.state = "error";
             botMessage.content += "\n\n⚠️ *Hata: " + err.message + "*";
-            broadcastSSE("error", { error: err.message });
+            broadcastSSE("error", { error: err.message, conversationId: activeConvId });
           });
 
           child.on("close", (code, signal) => {
@@ -2127,6 +2168,7 @@ const server = http.createServer(async (req, res) => {
             if (diagRssTimer) clearInterval(diagRssTimer);
             if (authWaitingChildProcess === child) authWaitingChildProcess = null;
             activeChildProcess = null;
+            const activeConvId = currentSession.conversationId || currentSession.id;
 
             if (child.pid) {
               try {
@@ -2138,6 +2180,7 @@ const server = http.createServer(async (req, res) => {
             if (manualStop) {
               manualStop = false;
               currentSession.isGenerating = false;
+              broadcastSSE("generating_done", { conversationId: activeConvId, isGenerating: false });
               return;
             }
 
@@ -2159,6 +2202,7 @@ const server = http.createServer(async (req, res) => {
             }
 
             currentSession.isGenerating = false;
+            broadcastSSE("generating_done", { conversationId: activeConvId, isGenerating: false });
 
             const tokenFile = "/data/data/com.termux/files/home/.gemini/antigravity-cli/antigravity-oauth-token";
             let tokenFileExists = false;
@@ -2171,8 +2215,8 @@ const server = http.createServer(async (req, res) => {
             if (isExplicitPermanentAuth) {
               botMessage.state = "error";
               botMessage.content = "⚠️ *AGY kimlik doğrulaması gerekiyor. Lütfen ayarlar üzerinden terminal ile tekrar giriş yapın.*";
-              broadcastSSE("auth_required", { error: lastResultError || "Kimlik doğrulaması gerekli.", needsReauth: true });
-              broadcastSSE("stopped", { reason: "auth_required" });
+              broadcastSSE("auth_required", { error: lastResultError || "Kimlik doğrulaması gerekli.", needsReauth: true, conversationId: activeConvId });
+              broadcastSSE("stopped", { reason: "auth_required", conversationId: activeConvId });
               return;
             }
 
@@ -2213,13 +2257,15 @@ const server = http.createServer(async (req, res) => {
                 error: errMsg,
                 exitCode: code,
                 fatal: !isAgentLimit,
-                botMessage: botMessage
+                botMessage: botMessage,
+                conversationId: activeConvId
               });
             } else {
               botMessage.state = "done";
               broadcastSSE("done", {
                 exitCode: code,
-                botMessage: botMessage
+                botMessage: botMessage,
+                conversationId: activeConvId
               });
             }
           });
