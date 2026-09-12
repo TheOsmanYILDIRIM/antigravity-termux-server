@@ -38,6 +38,22 @@ let pendingPkce = null;
 let manualStop = false;
 let sseClients = [];
 
+// SSE Keep-Alive Ping Interval (Every 15s to keep mobile OkHttp connection alive)
+setInterval(() => {
+  if (sseClients.length === 0) return;
+  const dead = [];
+  sseClients.forEach(client => {
+    try {
+      client.res.write(": ping\n\n");
+    } catch (e) {
+      dead.push(client.id);
+    }
+  });
+  if (dead.length > 0) {
+    sseClients = sseClients.filter(c => !dead.includes(c.id));
+  }
+}, 15000);
+
 const OAUTH_CLIENT_ID = process.env.OAUTH_CLIENT_ID || ("1071006060591-tmhssin2h21lcre" + "235vtolojh4g403ep." + "apps.googleusercontent.com");
 const OAUTH_CLIENT_SECRET = process.env.OAUTH_CLIENT_SECRET || ["GOCSPX", "-K58FWR486", "LdLJ1mLB8sXC4z6qDAf"].join("");
 const TOKEN_FILE_PATH = "/data/data/com.termux/files/home/.gemini/antigravity-cli/antigravity-oauth-token";
@@ -147,11 +163,24 @@ try {
   }
 } catch (e) {}
 
+let isFetchingModels = false;
+
 function refreshAgyModels() {
-  if (activeChildProcess) return;
-  const glibcCmd = "/data/data/com.termux/files/usr/glibc/lib/ld-linux-aarch64.so.1 --library-path /data/data/com.termux/files/usr/glibc/lib /data/data/com.termux/files/usr/bin/agy.va39 models 2>/dev/null";
-  const cmd = fs.existsSync("/data/data/com.termux/files/usr/bin/agy.va39") ? glibcCmd : "AGY_AUTO_UPDATE=0 agy models 2>/dev/null";
-  exec(cmd, { env: { ...process.env, CODEVIBE_ALLOW_FILE_KEYCHAIN: "1", AGY_AUTO_UPDATE: "0" }, timeout: 35000 }, (err, stdout) => {
+  if (activeChildProcess || isFetchingModels) return;
+  isFetchingModels = true;
+  const agyBin = fs.existsSync("/data/data/com.termux/files/usr/bin/agy") ? "/data/data/com.termux/files/usr/bin/agy" : "agy";
+  const cmd = `AGY_AUTO_UPDATE=0 ${agyBin} models 2>/dev/null`;
+  const env = {
+    ...process.env,
+    CODEVIBE_ALLOW_FILE_KEYCHAIN: "1",
+    AGY_AUTO_UPDATE: "0",
+    HOME: "/data/data/com.termux/files/home",
+    PREFIX: "/data/data/com.termux/files/usr",
+    PATH: process.env.PATH || "/data/data/com.termux/files/usr/bin",
+    TERM: "xterm-256color"
+  };
+  exec(cmd, { env, timeout: 35000 }, (err, stdout) => {
+    isFetchingModels = false;
     if (!err && stdout) {
       const lines = stdout.split("\n");
       const list = [];
@@ -179,79 +208,102 @@ function refreshAgyModels() {
   });
 }
 
-// Model listesini sadece önbellek dosyası yoksa veya boşsa arka planda tazele;
-if (!fs.existsSync(MODELS_CACHE_FILE)) {
+// Model listesini ilk açılışta ve her 15 dakikada bir arka planda tazele
+refreshAgyModels();
+setInterval(() => {
   refreshAgyModels();
-}
+}, 15 * 60 * 1000);
 
-// Brain Conversations Reader (True IDE / CLI Shared Memory)
-function getBrainConversations() {
-  const list = [];
+// Brain Conversations Reader (Non-blocking async header scanner + Memory Cache)
+const brainConversationsCache = new Map();
+let isScanningConversations = false;
+
+async function getBrainConversations(force = false) {
+  if (!fs.existsSync(BRAIN_DIR)) return [];
+  if (isScanningConversations && brainConversationsCache.size > 0 && !force) {
+    return Array.from(brainConversationsCache.values()).sort((a, b) => new Date(b.lastMessageTime) - new Date(a.lastMessageTime));
+  }
+
+  isScanningConversations = true;
   try {
-    if (!fs.existsSync(BRAIN_DIR)) return list;
-    const entries = fs.readdirSync(BRAIN_DIR, { withFileTypes: true });
+    const entries = await fs.promises.readdir(BRAIN_DIR, { withFileTypes: true });
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       const convId = entry.name;
       const transcriptFile = path.join(BRAIN_DIR, convId, ".system_generated/logs/transcript.jsonl");
-      if (!fs.existsSync(transcriptFile)) continue;
 
       try {
-        const stats = fs.statSync(transcriptFile);
-        const content = fs.readFileSync(transcriptFile, "utf-8");
-        const lines = content.split("\n").filter(l => l.trim().length > 0);
-        let title = "Antigravity IDE Sohbeti";
-        let createdAt = stats.mtime.toISOString();
-        let messageCount = 0;
-
-        for (const line of lines) {
-          try {
-            const step = JSON.parse(line);
-            if (step.type === "USER_INPUT") {
-              messageCount++;
-              if (title === "Antigravity IDE Sohbeti" && step.content) {
-                let clean = step.content;
-                const reqMatch = clean.match(/<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>/);
-                if (reqMatch && reqMatch[1]) {
-                  clean = reqMatch[1];
-                }
-                clean = clean.replace(/<[^>]+>/g, "").trim();
-                clean = clean.replace(/\s+/g, " ").trim();
-                if (clean) {
-                  title = clean.length > 45 ? clean.slice(0, 45) + "…" : clean;
-                }
-                if (step.created_at) createdAt = step.created_at;
-              }
-            } else if (step.type === "PLANNER_RESPONSE" && (step.content || step.tool_calls)) {
-              messageCount++;
-            }
-          } catch (e) {}
+        const stats = await fs.promises.stat(transcriptFile);
+        const cached = brainConversationsCache.get(convId);
+        if (cached && cached.mtimeMs === stats.mtimeMs && cached.size === stats.size && !force) {
+          continue;
         }
 
-        list.push({
+        let title = "Antigravity IDE Sohbeti";
+        let createdAt = stats.mtime.toISOString();
+        let messageCount = 1;
+
+        let fd = null;
+        try {
+          fd = await fs.promises.open(transcriptFile, "r");
+          const buf = Buffer.alloc(16384);
+          const { bytesRead } = await fd.read(buf, 0, 16384, 0);
+          const chunk = buf.toString("utf-8", 0, bytesRead);
+          const lines = chunk.split("\n");
+
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            try {
+              const step = JSON.parse(line);
+              if (step.type === "USER_INPUT") {
+                if (title === "Antigravity IDE Sohbeti" && step.content) {
+                  let clean = step.content;
+                  const reqMatch = clean.match(/<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>/);
+                  if (reqMatch && reqMatch[1]) clean = reqMatch[1];
+                  clean = clean.replace(/<[^>]+>/g, "").trim().replace(/\s+/g, " ");
+                  if (clean) title = clean.length > 45 ? clean.slice(0, 45) + "…" : clean;
+                  if (step.created_at) createdAt = step.created_at;
+                  break;
+                }
+              }
+            } catch (e) {}
+          }
+        } finally {
+          if (fd) await fd.close();
+        }
+
+        brainConversationsCache.set(convId, {
           id: convId,
           title: title,
           createdAt: createdAt,
           lastMessageTime: stats.mtime.toISOString(),
-          messageCount: messageCount
+          messageCount: messageCount,
+          mtimeMs: stats.mtimeMs,
+          size: stats.size
         });
       } catch (err) {}
     }
-
-    list.sort((a, b) => new Date(b.lastMessageTime) - new Date(a.lastMessageTime));
   } catch (e) {
-    console.error("Error reading brain conversations:", e);
+    console.error("Error scanning brain conversations:", e.message);
+  } finally {
+    isScanningConversations = false;
   }
-  return list;
+
+  return Array.from(brainConversationsCache.values()).sort((a, b) => new Date(b.lastMessageTime) - new Date(a.lastMessageTime));
 }
 
-function loadBrainConversation(id) {
+// Background scanner every 30 seconds
+setInterval(() => {
+  getBrainConversations().catch(() => {});
+}, 30000);
+
+async function loadBrainConversation(id) {
   if (!id) return null;
   const transcriptFile = path.join(BRAIN_DIR, id, ".system_generated/logs/transcript.jsonl");
   if (!fs.existsSync(transcriptFile)) return null;
 
   try {
-    const content = fs.readFileSync(transcriptFile, "utf-8");
+    const content = await fs.promises.readFile(transcriptFile, "utf-8");
     const lines = content.split("\n").filter(l => l.trim().length > 0);
     const messages = [];
     let title = "Antigravity IDE Sohbeti";
@@ -322,11 +374,16 @@ let currentSession = {
   isGenerating: false
 };
 
-const initialBrainList = getBrainConversations();
-if (initialBrainList.length > 0) {
-  const latestBrain = loadBrainConversation(initialBrainList[0].id);
-  if (latestBrain) { currentSession = latestBrain; currentSession.isGenerating = false; }
-}
+// Asynchronous boot load of latest conversation
+getBrainConversations().then(async (brainList) => {
+  if (brainList.length > 0) {
+    const latestBrain = await loadBrainConversation(brainList[0].id);
+    if (latestBrain && (!currentSession.id || currentSession.id === latestBrain.id)) {
+      currentSession = latestBrain;
+      currentSession.isGenerating = false;
+    }
+  }
+}).catch(() => {});
 
 function broadcastSSE(event, data) {
   const payload = "event: " + event + "\ndata: " + JSON.stringify(data) + "\n\n";
@@ -616,115 +673,207 @@ function resolveAnyFilePath(rawPath) {
   return clean;
 }
 
-// Usage Metrics (Real transcript & token computation)
+// Usage Metrics (Real AGY CLI Quota & Structured Token Stats)
 let cachedUsageMetrics = null;
 let lastUsageCalculatedAt = 0;
+let isFetchingUsage = false;
 
-function computeCLIUsageMetrics() {
-  const now = Date.now();
-  if (cachedUsageMetrics && (now - lastUsageCalculatedAt < 60 * 1000)) {
-    return cachedUsageMetrics;
-  }
+function parseUsageData(data, lastTurn = null) {
+  let gemini5hRemaining = 100;
+  let geminiWeeklyRemaining = 100;
+  let gemini5hReset = null;
+  let geminiWeeklyReset = null;
+  let claudeWeeklyRemaining = 0;
+  let claude5hRemaining = null;
 
-  let totalInputTokens = 0;
-  let totalOutputTokens = 0;
-  let totalThinkingTokens = 0;
-  let totalTokens = 0;
-  let recent5hTokens = 0;
-  let recent5hTurns = 0;
-  let weeklyTurns = 0;
-  const fiveHoursMs = 5 * 60 * 60 * 1000;
-
-  try {
-    if (fs.existsSync(BRAIN_DIR)) {
-      const convFolders = fs.readdirSync(BRAIN_DIR);
-      for (const folder of convFolders) {
-        const transcriptFile = path.join(BRAIN_DIR, folder, ".system_generated/logs/transcript.jsonl");
-        if (fs.existsSync(transcriptFile)) {
-          const content = fs.readFileSync(transcriptFile, "utf-8");
-          const lines = content.split("\n");
-          for (const line of lines) {
-            if (!line.trim()) continue;
-            try {
-              const item = JSON.parse(line);
-              const time = item.created_at ? new Date(item.created_at).getTime() : now;
-              let tok = 0;
-
-              if (item.usage && item.usage.total_tokens) {
-                tok = item.usage.total_tokens;
-                totalInputTokens += (item.usage.input_tokens || 0);
-                totalOutputTokens += (item.usage.output_tokens || 0);
-                totalThinkingTokens += (item.usage.thinking_tokens || 0);
-              } else {
-                const inChars = (item.type === "USER_INPUT" ? (item.content || "").length : 0);
-                const outChars = (item.type === "PLANNER_RESPONSE" || item.type === "MODEL" ? (item.content || "").length : 0);
-                const thinkChars = (item.thinking || "").length;
-                const toolChars = (item.type === "RUN_COMMAND" || item.type === "VIEW_FILE" ? (item.content || "").length : 0);
-
-                const inTok = Math.ceil(inChars / 3.8);
-                const outTok = Math.ceil(outChars / 3.8);
-                const thinkTok = Math.ceil(thinkChars / 3.8);
-                const toolTok = Math.ceil(toolChars / 3.8);
-                tok = inTok + outTok + thinkTok + toolTok;
-
-                totalInputTokens += inTok + toolTok;
-                totalOutputTokens += outTok;
-                totalThinkingTokens += thinkTok;
-              }
-
-              if (tok > 0) {
-                totalTokens += tok;
-                weeklyTurns++;
-                if (now - time <= fiveHoursMs) {
-                  recent5hTokens += tok;
-                  recent5hTurns++;
-                }
-              }
-            } catch (e) {}
+  if (data && Array.isArray(data.groups)) {
+    for (const group of data.groups) {
+      const gName = (group.name || "").toLowerCase();
+      if (gName.includes("gemini")) {
+        for (const b of (group.buckets || [])) {
+          if (b.window === "5h" || (b.id && b.id.includes("5h"))) {
+            gemini5hRemaining = Math.max(0, Math.min(100, Math.round((b.remaining_fraction || 0) * 100)));
+            gemini5hReset = b.reset_time;
+          } else if (b.window === "weekly" || (b.id && b.id.includes("weekly"))) {
+            geminiWeeklyRemaining = Math.max(0, Math.min(100, Math.round((b.remaining_fraction || 0) * 100)));
+            geminiWeeklyReset = b.reset_time;
+          }
+        }
+      } else if (gName.includes("claude") || gName.includes("gpt") || gName.includes("3p")) {
+        for (const b of (group.buckets || [])) {
+          if (b.window === "weekly" || (b.id && b.id.includes("weekly"))) {
+            claudeWeeklyRemaining = Math.max(0, Math.min(100, Math.round((b.remaining_fraction || 0) * 100)));
+          } else if (b.window === "5h" || (b.id && b.id.includes("5h"))) {
+            claude5hRemaining = b.disabled ? "disabled" : Math.max(0, Math.min(100, Math.round((b.remaining_fraction || 0) * 100)));
           }
         }
       }
     }
-  } catch (e) {}
-
-  let lastTurnUsage = null;
-  if (currentSession && Array.isArray(currentSession.messages)) {
-    const lastBot = [...currentSession.messages].reverse().find(m => m.role === "bot" && m.usage);
-    if (lastBot) lastTurnUsage = lastBot.usage;
   }
 
-  const standard5hQuota = 500000;
-  const standardWeeklyQuota = 5000000;
-  const used5hPercent = Math.min(100, Math.round((recent5hTokens / standard5hQuota) * 100));
-  const remaining5hPercent = Math.max(0, 100 - used5hPercent);
-  const usedWeeklyPercent = Math.min(100, Math.round((totalTokens / standardWeeklyQuota) * 100));
-  const remainingWeeklyPercent = Math.max(0, 100 - usedWeeklyPercent);
+  let turnUsage = lastTurn;
+  if (!turnUsage && currentSession && Array.isArray(currentSession.messages)) {
+    const lastBot = [...currentSession.messages].reverse().find(m => m.role === "bot" && m.usage);
+    if (lastBot) turnUsage = lastBot.usage;
+  }
 
-  cachedUsageMetrics = {
+  return {
     recent5h: {
-      totalTokens: recent5hTokens,
-      turnCount: recent5hTurns,
-      usedPercent: used5hPercent,
-      remainingPercent: remaining5hPercent,
-      windowHours: 5
+      totalTokens: turnUsage ? (turnUsage.total_tokens || 0) : 0,
+      turnCount: 1,
+      usedPercent: 100 - gemini5hRemaining,
+      remainingPercent: gemini5hRemaining,
+      windowHours: 5,
+      resetTime: gemini5hReset
     },
     weekly: {
-      totalTokens: totalTokens,
-      turnCount: weeklyTurns,
-      usedPercent: usedWeeklyPercent,
-      remainingPercent: remainingWeeklyPercent,
-      inputTokens: totalInputTokens,
-      outputTokens: totalOutputTokens,
-      thinkingTokens: totalThinkingTokens
+      totalTokens: turnUsage ? (turnUsage.total_tokens || 0) : 0,
+      turnCount: 1,
+      usedPercent: 100 - geminiWeeklyRemaining,
+      remainingPercent: geminiWeeklyRemaining,
+      inputTokens: turnUsage ? (turnUsage.input_tokens || 0) : 0,
+      outputTokens: turnUsage ? (turnUsage.output_tokens || 0) : 0,
+      thinkingTokens: turnUsage ? (turnUsage.thinking_tokens || 0) : 0,
+      resetTime: geminiWeeklyReset
     },
-    lastTurn: lastTurnUsage,
+    groups: data && Array.isArray(data.groups) ? data.groups : [],
+    lastTurn: turnUsage,
     lastUpdated: new Date().toISOString()
   };
-  lastUsageCalculatedAt = now;
-  return cachedUsageMetrics;
 }
 
-const server = http.createServer((req, res) => {
+function formatUsageMarkdown(usageData) {
+  if (!usageData || !Array.isArray(usageData.groups)) {
+    return "📊 *Model kota bilgisi alınamadı.*";
+  }
+
+  let md = "### 📊 Model Kotası & Kalan Limitler\n\n";
+  md += "| Model Grubu | Limit Türü | Kalan | Yenilenme Zamanı |\n";
+  md += "| :--- | :--- | :--- | :--- |\n";
+
+  for (const group of usageData.groups) {
+    const gName = group.name || "Modeller";
+    for (const b of (group.buckets || [])) {
+      const bName = b.name || b.window || "Limit";
+      let remText = "%" + Math.round((b.remaining_fraction || 0) * 100);
+      if (b.disabled) remText = "Devre Dışı";
+      else if (b.remaining_fraction === 0) remText = "❌ %0 (Doldu)";
+      else if (b.remaining_fraction > 0.5) remText = "🟢 " + remText;
+      else if (b.remaining_fraction > 0.2) remText = "🟡 " + remText;
+      else remText = "🔴 " + remText;
+
+      let resetText = "-";
+      if (b.reset_time) {
+        try {
+          const d = new Date(b.reset_time);
+          resetText = d.toLocaleString("tr-TR", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+        } catch (e) {
+          resetText = b.reset_time;
+        }
+      }
+
+      md += `| **${gName}** | ${bName} | ${remText} | ${resetText} |\n`;
+    }
+  }
+
+  md += "\n> 💡 *Her model grubu içinde modeller ortak 5 saatlik ve haftalık havuzu paylaşır.*";
+  return md;
+}
+
+function formatModelsMarkdown(currentModelId = null) {
+  let md = "### 🤖 Kullanılabilir Antigravity Modelleri\n\n";
+  md += "| Model ID | Model Adı | Açıklama |\n";
+  md += "| :--- | :--- | :--- |\n";
+  for (const m of cachedModels) {
+    const isCurrent = currentModelId ? (m.id === currentModelId) : false;
+    const indicator = isCurrent ? "⭐ **(Aktif)** " : "";
+    md += `| \`${m.id}\` | ${indicator}${m.name} | ${m.description} |\n`;
+  }
+  md += "\n> 💡 *Model değiştirmek için üst bardaki model adına dokunabilir veya `/model <model-id>` parametresi verebilirsiniz.*";
+  return md;
+}
+
+function formatHelpMarkdown(helpData) {
+  if (!helpData || !Array.isArray(helpData.commands)) {
+    return "💡 *Kullanılabilir komutlar listelenemedi.*";
+  }
+  let md = "### ⚡ Kullanılabilir Slash Komutları\n\n";
+  md += "| Komut | Açıklama |\n";
+  md += "| :--- | :--- |\n";
+  for (const cmd of helpData.commands) {
+    const aliasStr = cmd.aliases && cmd.aliases.length > 0 ? ` (veya /${cmd.aliases.join(', /')})` : '';
+    md += `| \`/${cmd.name}\`${aliasStr} | ${cmd.description || ''} |\n`;
+  }
+  return md;
+}
+
+async function fetchRealAgyUsage(force = false) {
+  const now = Date.now();
+  if (!force && cachedUsageMetrics && (now - lastUsageCalculatedAt < 60 * 1000)) {
+    return cachedUsageMetrics;
+  }
+
+  if (isFetchingUsage) {
+    return cachedUsageMetrics || parseUsageData(null);
+  }
+
+  isFetchingUsage = true;
+  return new Promise((resolve) => {
+    const env = {
+      ...process.env,
+      CODEVIBE_ALLOW_FILE_KEYCHAIN: "1",
+      AGY_AUTO_UPDATE: "0",
+      HOME: "/data/data/com.termux/files/home",
+      PREFIX: "/data/data/com.termux/files/usr",
+      PATH: process.env.PATH || "/data/data/com.termux/files/usr/bin",
+      TERM: "xterm-256color"
+    };
+
+    const agyBin = fs.existsSync("/data/data/com.termux/files/usr/bin/agy") ? "/data/data/com.termux/files/usr/bin/agy" : "agy";
+    const child = spawn(agyBin, ["-p", "/usage", "--output-format", "json"], { env });
+
+    let stdout = "";
+    const timer = setTimeout(() => {
+      try { child.kill("SIGKILL"); } catch (e) {}
+      isFetchingUsage = false;
+      resolve(cachedUsageMetrics || parseUsageData(null));
+    }, 35000);
+
+    child.stdout.on("data", d => { stdout += d.toString(); });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      isFetchingUsage = false;
+      try {
+        if (code === 0 && stdout.trim()) {
+          const json = JSON.parse(stdout.trim());
+          const data = (json.command && json.command.data) || (json.result && json.result.command && json.result.command.data) || null;
+          if (data) {
+            cachedUsageMetrics = parseUsageData(data);
+            lastUsageCalculatedAt = Date.now();
+            broadcastSSE("usage_update", { usage: cachedUsageMetrics });
+            resolve(cachedUsageMetrics);
+            return;
+          }
+        }
+      } catch (e) {}
+      resolve(cachedUsageMetrics || parseUsageData(null));
+    });
+
+    child.on("error", () => {
+      clearTimeout(timer);
+      isFetchingUsage = false;
+      resolve(cachedUsageMetrics || parseUsageData(null));
+    });
+  });
+}
+
+// Initial fetch on boot & periodic background refresh every 5 mins (300,000 ms)
+fetchRealAgyUsage().catch(() => {});
+setInterval(() => {
+  fetchRealAgyUsage(true).catch(() => {});
+}, 5 * 60 * 1000);
+
+const server = http.createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -988,9 +1137,12 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // Model Quota & Usage
+  // Model Quota & Usage (Real non-blocking AGY metrics)
   if (pathname === "/api/usage" && req.method === "GET") {
-    const usage = computeCLIUsageMetrics();
+    const usage = cachedUsageMetrics || parseUsageData(null);
+    if (Date.now() - lastUsageCalculatedAt > 60 * 1000) {
+      fetchRealAgyUsage(true).catch(() => {});
+    }
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ status: "ok", usage }));
     return;
@@ -1328,9 +1480,9 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // List Conversations (Direct from Brain)
+  // List Conversations (Direct from Brain Cache - Non-blocking)
   if (pathname === "/api/conversations" && req.method === "GET") {
-    const list = getBrainConversations();
+    const list = await getBrainConversations();
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({
       status: "ok",
@@ -1343,10 +1495,10 @@ const server = http.createServer((req, res) => {
   // Export All Conversations (Full JSON / Markdown archive)
   if (pathname === "/api/export/all" && req.method === "GET") {
     try {
-      const convList = getBrainConversations();
+      const convList = await getBrainConversations();
       const allSessions = [];
       for (const meta of convList) {
-        const full = loadBrainConversation(meta.id);
+        const full = await loadBrainConversation(meta.id);
         if (full) allSessions.push(full);
       }
       res.writeHead(200, {
@@ -1368,7 +1520,7 @@ const server = http.createServer((req, res) => {
   // Load Specific Conversation
   if (pathname.startsWith("/api/conversations/") && req.method === "GET") {
     const convId = pathname.replace("/api/conversations/", "").trim();
-    const brainSession = loadBrainConversation(convId);
+    const brainSession = await loadBrainConversation(convId);
     if (brainSession) {
       currentSession = brainSession;
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -1387,13 +1539,14 @@ const server = http.createServer((req, res) => {
     try {
       const convFolder = path.join(BRAIN_DIR, convId);
       if (fs.existsSync(convFolder)) {
-        fs.rmSync(convFolder, { recursive: true, force: true });
+        await fs.promises.rm(convFolder, { recursive: true, force: true });
       }
+      brainConversationsCache.delete(convId);
 
-      const list = getBrainConversations();
+      const list = await getBrainConversations(true);
       if (currentSession.conversationId === convId || currentSession.id === convId) {
         if (list.length > 0) {
-          const next = loadBrainConversation(list[0].id);
+          const next = await loadBrainConversation(list[0].id);
           currentSession = next || { id: null, conversationId: null, title: "Yeni Sohbet", messages: [], isGenerating: false };
         } else {
           currentSession = { id: null, conversationId: null, title: "Yeni Sohbet", messages: [], isGenerating: false };
@@ -1860,6 +2013,45 @@ const server = http.createServer((req, res) => {
                   if (update.usage) {
                     botMessage.usage = update.usage;
                   }
+                } else if (eventObj.event === "command_result") {
+                  const cmd = eventObj.command;
+                  if (cmd && cmd.name === "usage" && cmd.data) {
+                    const formatted = formatUsageMarkdown(cmd.data);
+                    cachedUsageMetrics = parseUsageData(cmd.data);
+                    lastUsageCalculatedAt = Date.now();
+                    botMessage.content = formatted;
+                    hasStreamedChunk = true;
+                    broadcastSSE("chunk", {
+                      text_delta: formatted,
+                      full_content: formatted
+                    });
+                    broadcastSSE("usage_update", { usage: cachedUsageMetrics });
+                  } else if (cmd && (cmd.name === "model" || cmd.name === "models")) {
+                    const activeId = (cmd.data && cmd.data.id) ? cmd.data.id : null;
+                    const formatted = formatModelsMarkdown(activeId);
+                    botMessage.content = formatted;
+                    hasStreamedChunk = true;
+                    broadcastSSE("chunk", {
+                      text_delta: formatted,
+                      full_content: formatted
+                    });
+                  } else if (cmd && cmd.name === "help" && cmd.data) {
+                    const formatted = formatHelpMarkdown(cmd.data);
+                    botMessage.content = formatted;
+                    hasStreamedChunk = true;
+                    broadcastSSE("chunk", {
+                      text_delta: formatted,
+                      full_content: formatted
+                    });
+                  } else if (cmd && cmd.data) {
+                    const formatted = typeof cmd.data === "string" ? cmd.data : "```json\n" + JSON.stringify(cmd.data, null, 2) + "\n```";
+                    botMessage.content = formatted;
+                    hasStreamedChunk = true;
+                    broadcastSSE("chunk", {
+                      text_delta: formatted,
+                      full_content: formatted
+                    });
+                  }
                 } else if (eventObj.event === "result") {
                   const resObj = eventObj.result;
                   lastResultStatus = (resObj && resObj.status) ? String(resObj.status).toUpperCase() : null;
@@ -1868,9 +2060,21 @@ const server = http.createServer((req, res) => {
                     numTurns = resObj.num_turns;
                   }
 
-                  if (resObj && resObj.response) {
+                  if (resObj && resObj.command && resObj.command.name === "usage" && resObj.command.data) {
+                    const formatted = formatUsageMarkdown(resObj.command.data);
+                    cachedUsageMetrics = parseUsageData(resObj.command.data);
+                    lastUsageCalculatedAt = Date.now();
+                    botMessage.content = formatted;
+                    broadcastSSE("usage_update", { usage: cachedUsageMetrics });
+                  } else if (resObj && resObj.command && (resObj.command.name === "model" || resObj.command.name === "models")) {
+                    const activeId = (resObj.command.data && resObj.command.data.id) ? resObj.command.data.id : null;
+                    botMessage.content = formatModelsMarkdown(activeId);
+                  } else if (resObj && resObj.command && resObj.command.name === "help" && resObj.command.data) {
+                    botMessage.content = formatHelpMarkdown(resObj.command.data);
+                  } else if (resObj && resObj.response && (!botMessage.content || botMessage.content.trim().length === 0)) {
                     botMessage.content = resObj.response;
                   }
+
                   if (resObj && resObj.usage) {
                     botMessage.usage = resObj.usage;
                   }
