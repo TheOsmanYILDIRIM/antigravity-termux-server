@@ -1530,18 +1530,12 @@ const server = http.createServer(async (req, res) => {
     const brainSession = await loadBrainConversation(convId);
     if (brainSession) {
       const isGeneratingThis = Boolean(currentSession.isGenerating && (currentSession.conversationId === convId || currentSession.id === convId));
-      if (!currentSession.isGenerating) {
-        currentSession = brainSession;
-      }
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({
         status: "ok",
         session: brainSession,
         isGenerating: isGeneratingThis
       }));
-      if (!currentSession.isGenerating) {
-        broadcastSSE("session_loaded", { session: brainSession });
-      }
     } else {
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Sohbet kaydı bulunamadı." }));
@@ -1561,17 +1555,11 @@ const server = http.createServer(async (req, res) => {
 
       const list = await getBrainConversations(true);
       if (currentSession.conversationId === convId || currentSession.id === convId) {
-        if (list.length > 0) {
-          const next = await loadBrainConversation(list[0].id);
-          currentSession = next || { id: null, conversationId: null, title: "Yeni Sohbet", messages: [], isGenerating: false };
-        } else {
-          currentSession = { id: null, conversationId: null, title: "Yeni Sohbet", messages: [], isGenerating: false };
-        }
+        currentSession = { id: null, conversationId: null, title: "Yeni Sohbet", messages: [], isGenerating: false };
       }
 
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ status: "ok", conversations: list }));
-      broadcastSSE("session_loaded", { session: currentSession });
     } catch (e) {
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: e.message }));
