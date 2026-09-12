@@ -1529,10 +1529,19 @@ const server = http.createServer(async (req, res) => {
     const convId = pathname.replace("/api/conversations/", "").trim();
     const brainSession = await loadBrainConversation(convId);
     if (brainSession) {
-      currentSession = brainSession;
+      const isGeneratingThis = Boolean(currentSession.isGenerating && (currentSession.conversationId === convId || currentSession.id === convId));
+      if (!currentSession.isGenerating) {
+        currentSession = brainSession;
+      }
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", session: currentSession }));
-      broadcastSSE("session_loaded", { session: currentSession });
+      res.end(JSON.stringify({
+        status: "ok",
+        session: brainSession,
+        isGenerating: isGeneratingThis
+      }));
+      if (!currentSession.isGenerating) {
+        broadcastSSE("session_loaded", { session: brainSession });
+      }
     } else {
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Sohbet kaydı bulunamadı." }));
@@ -1720,11 +1729,7 @@ const server = http.createServer(async (req, res) => {
 
   // New Chat
   if (pathname === "/api/new-chat" && req.method === "POST") {
-    if (activeChildProcess) {
-      try { activeChildProcess.kill("SIGINT"); } catch (e) {}
-      activeChildProcess = null;
-    }
-    currentSession = {
+    const cleanSession = {
       id: null,
       conversationId: null,
       title: "Yeni Sohbet",
@@ -1732,10 +1737,13 @@ const server = http.createServer(async (req, res) => {
       isGenerating: false,
       createdAt: new Date().toISOString()
     };
-    broadcastSSE("session_reset", { session: currentSession });
+    if (!currentSession.isGenerating) {
+      currentSession = cleanSession;
+      broadcastSSE("session_reset", { session: cleanSession });
+    }
 
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ status: "ok", session: currentSession }));
+    res.end(JSON.stringify({ status: "ok", session: cleanSession }));
     return;
   }
 
@@ -1774,9 +1782,21 @@ const server = http.createServer(async (req, res) => {
       try {
         const data = JSON.parse(body || "{}");
         let prompt = (data.prompt || "").trim();
-        const targetConvId = (data.conversationId || data.sessionId || currentSession.conversationId || currentSession.id || "").trim();
-        const continueChat = data.continue !== false && targetConvId.length > 0;
-        if (targetConvId) {
+        const reqConvId = (data.conversationId || data.sessionId || "").trim();
+        const isExplicitNew = data.continue === false || reqConvId.length === 0;
+        const continueChat = !isExplicitNew && reqConvId.length > 0;
+        const targetConvId = continueChat ? reqConvId : "";
+
+        if (!continueChat) {
+          currentSession = {
+            id: null,
+            conversationId: null,
+            title: prompt.length > 35 ? prompt.slice(0, 35) + "…" : (prompt || "Yeni Sohbet"),
+            messages: [],
+            isGenerating: false,
+            createdAt: new Date().toISOString()
+          };
+        } else {
           currentSession.conversationId = targetConvId;
           currentSession.id = targetConvId;
         }
