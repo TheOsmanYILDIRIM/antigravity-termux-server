@@ -344,6 +344,7 @@ async function loadBrainConversation(id) {
             tools: tools,
             usage: {
               turn_tokens: turnTok,
+              context_tokens: turnTok,
               total_tokens: turnTok,
               input_tokens: 0,
               output_tokens: Math.max(1, Math.round(botContent.length / 3.6))
@@ -353,6 +354,22 @@ async function loadBrainConversation(id) {
           });
         }
       } catch (e) {}
+    }
+
+    // Post-process messages to assign accurate cumulative context_tokens
+    let runningChars = 0;
+    for (const m of messages) {
+      runningChars += (m.content || "").length;
+      if (Array.isArray(m.tools)) {
+        for (const t of m.tools) {
+          runningChars += (t.name || "").length + JSON.stringify(t.parameters || {}).length;
+        }
+      }
+      if (m.role === "bot" && m.usage) {
+        const cumulativeContext = Math.max(1, Math.round(runningChars / 3.6));
+        m.usage.context_tokens = cumulativeContext;
+        m.usage.total_tokens = cumulativeContext;
+      }
     }
 
     return {
