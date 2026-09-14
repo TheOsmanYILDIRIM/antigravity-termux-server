@@ -377,6 +377,93 @@ function broadcastSSE(event, data) {
   } catch (e) {}
 }
 
+function compactConversationTranscript(convId, thresholdTokens = 80000, force = false) {
+  if (!convId) return { compacted: false, reason: "No conversation ID" };
+  const transcriptPath = path.join(BRAIN_DIR, convId, ".system_generated/logs/transcript.jsonl");
+  const fullTranscriptPath = path.join(BRAIN_DIR, convId, ".system_generated/logs/transcript_full.jsonl");
+  if (!fs.existsSync(transcriptPath)) return { compacted: false, reason: "Transcript not found" };
+
+  try {
+    const raw = fs.readFileSync(transcriptPath, "utf-8");
+    const lines = raw.split("\n").filter(l => l.trim().length > 0);
+    if (lines.length < 4 && !force) {
+      return { compacted: false, reason: "Conversation too short to compact" };
+    }
+
+    const estimatedTokens = Math.round(raw.length / 3.8);
+    if (!force && estimatedTokens < thresholdTokens) {
+      return { compacted: false, reason: "Below token threshold", currentTokens: estimatedTokens };
+    }
+
+    if (!fs.existsSync(fullTranscriptPath)) {
+      try { fs.writeFileSync(fullTranscriptPath, raw, "utf-8"); } catch (e) {}
+    }
+
+    const steps = [];
+    for (const line of lines) {
+      try { steps.push(JSON.parse(line)); } catch (e) {}
+    }
+
+    if (steps.length === 0) return { compacted: false, reason: "No valid steps" };
+
+    const preserveCount = Math.min(4, steps.length);
+    const splitIndex = steps.length - preserveCount;
+    const oldSteps = steps.slice(0, splitIndex);
+    const recentSteps = steps.slice(splitIndex);
+
+    let prunedCount = 0;
+    const compactedOldSteps = oldSteps.map(step => {
+      if (step.tool_calls && Array.isArray(step.tool_calls)) {
+        const prunedCalls = step.tool_calls.map(tc => {
+          prunedCount++;
+          return {
+            name: tc.name,
+            state: "done",
+            args: tc.args ? { summary: "[Pruned observation: Archived in full transcript]" } : {}
+          };
+        });
+        return {
+          ...step,
+          thinking: undefined,
+          tool_calls: prunedCalls
+        };
+      }
+      return step;
+    });
+
+    const title = extractSessionTitle(lines);
+    const anchorStep = {
+      step_index: 0,
+      source: "SYSTEM",
+      type: "COMPACT_STATE",
+      created_at: new Date().toISOString(),
+      content: `📦 [In-Place Compact: Oturum bağlamı başarıyla sıkıştırıldı.]\n\n### 🎯 Aktif Durum ve Konu: ${title}\n- Eski araç çıktıları ve düşünce zincirleri budandı.\n- Tüm detaylı geçmiş transcript_full.jsonl dosyasında güvenle saklanmaktadır.`
+    };
+
+    const newSteps = [anchorStep, ...compactedOldSteps, ...recentSteps];
+    const newContent = newSteps.map(s => JSON.stringify(s)).join("\n") + "\n";
+    fs.writeFileSync(transcriptPath, newContent, "utf-8");
+
+    const newEstimatedTokens = Math.round(newContent.length / 3.8);
+    const savedPercent = Math.max(0, Math.round(((estimatedTokens - newEstimatedTokens) / (estimatedTokens || 1)) * 100));
+
+    const result = {
+      compacted: true,
+      conversationId: convId,
+      beforeTokens: estimatedTokens,
+      afterTokens: newEstimatedTokens,
+      savedPercent: savedPercent,
+      prunedToolsCount: prunedCount,
+      summary: `Bağlam ${estimatedTokens.toLocaleString()} tok -> ${newEstimatedTokens.toLocaleString()} tok seviyesine indirildi (%${savedPercent} tasarruf).`
+    };
+
+    broadcastSSE("compact_completed", result);
+    return result;
+  } catch (err) {
+    return { compacted: false, error: err.message };
+  }
+}
+
 function extractSessionTitle(lines) {
   let latestAiTitle = null;
   let fallbackUserTitle = null;
@@ -1775,6 +1862,25 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Explicit In-Place Compaction Endpoint
+  if (pathname === "/api/chat/compact" && req.method === "POST") {
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", () => {
+      try {
+        const data = JSON.parse(body || "{}");
+        const convId = data.conversationId || currentSession.conversationId || currentSession.id;
+        const resStats = compactConversationTranscript(convId, 0, true);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "ok", ...resStats }));
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+
   // Chat Execution (Spawns Antigravity Engine with Stream JSON)
   if (pathname === "/api/chat" && req.method === "POST") {
     let body = "";
@@ -1791,6 +1897,21 @@ const server = http.createServer(async (req, res) => {
         const isExplicitNew = data.continue === false || reqConvId.length === 0;
         const continueChat = !isExplicitNew && reqConvId.length > 0;
         const targetConvId = continueChat ? reqConvId : "";
+
+        // Check if user entered /compact slash command
+        if (prompt === "/compact" || prompt.startsWith("/compact ")) {
+          const convId = targetConvId || currentSession.conversationId || currentSession.id;
+          const compactRes = compactConversationTranscript(convId, 0, true);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ status: "ok", message: "Bağlam sıkıştırıldı.", ...compactRes }));
+          return;
+        }
+
+        // Auto-Compact Check: If conversation exceeds threshold, compact before running agy
+        if (continueChat && targetConvId && data.autoCompact !== false) {
+          const threshold = parseInt(data.compactThresholdTokens || 80000, 10);
+          compactConversationTranscript(targetConvId, threshold, false);
+        }
 
         if (!continueChat) {
           currentSession = {
