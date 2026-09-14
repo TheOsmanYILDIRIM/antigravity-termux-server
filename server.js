@@ -337,10 +337,17 @@ async function loadBrainConversation(id) {
               });
             });
           }
+          let turnTok = Math.max(1, Math.round((botContent.length + JSON.stringify(tools).length) / 3.6));
           messages.push({
             role: "bot",
             content: botContent,
             tools: tools,
+            usage: {
+              turn_tokens: turnTok,
+              total_tokens: turnTok,
+              input_tokens: 0,
+              output_tokens: Math.max(1, Math.round(botContent.length / 3.6))
+            },
             time: step.created_at || new Date().toISOString(),
             state: "done"
           });
@@ -872,8 +879,29 @@ function resolveAnyFilePath(rawPath) {
 
 // Usage Metrics (Real AGY CLI Quota & Structured Token Stats)
 let cachedUsageMetrics = null;
-let lastUsageCalculatedAt = 0;
-let isFetchingUsage = false;
+function calculateSessionContextTokens(session) {
+  if (!session || !Array.isArray(session.messages)) return 0;
+  let totalChars = 0;
+  for (const m of session.messages) {
+    totalChars += (m.content || "").length;
+    if (Array.isArray(m.tools)) {
+      for (const t of m.tools) {
+        totalChars += (t.name || "").length + JSON.stringify(t.parameters || {}).length + (typeof t.output === "string" ? t.output.length : JSON.stringify(t.output || "").length);
+      }
+    }
+  }
+  return Math.max(1, Math.round(totalChars / 3.6));
+}
+
+function calculateTurnTokens(userPrompt, botMsg) {
+  let turnChars = (userPrompt || "").length + (botMsg.content || "").length;
+  if (Array.isArray(botMsg.tools)) {
+    for (const t of botMsg.tools) {
+      turnChars += (t.name || "").length + JSON.stringify(t.parameters || {}).length + (typeof t.output === "string" ? t.output.length : JSON.stringify(t.output || "").length);
+    }
+  }
+  return Math.max(1, Math.round(turnChars / 3.6));
+}
 
 function parseUsageData(data, lastTurn = null) {
   let gemini5hRemaining = 100;
@@ -2366,7 +2394,18 @@ const server = http.createServer(async (req, res) => {
                   }
 
                   if (resObj && resObj.usage) {
-                    botMessage.usage = resObj.usage;
+                    const activeContextTokens = calculateSessionContextTokens(currentSession);
+                    const turnTokens = calculateTurnTokens(prompt, botMessage);
+                    botMessage.usage = {
+                      input_tokens: resObj.usage.input_tokens > 0 ? resObj.usage.input_tokens : Math.max(1, Math.round((prompt || "").length / 3.6)),
+                      output_tokens: resObj.usage.output_tokens > 0 ? resObj.usage.output_tokens : Math.max(1, Math.round((botMessage.content || "").length / 3.6)),
+                      thinking_tokens: resObj.usage.thinking_tokens || 0,
+                      cache_read_tokens: resObj.usage.cache_read_tokens || 0,
+                      turn_tokens: turnTokens,
+                      context_tokens: activeContextTokens,
+                      total_tokens: activeContextTokens,
+                      cumulative_tokens: resObj.usage.total_tokens || activeContextTokens
+                    };
                   }
                   if (resObj && resObj.conversation_id) {
                     currentSession.conversationId = resObj.conversation_id;
