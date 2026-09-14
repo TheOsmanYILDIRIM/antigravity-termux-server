@@ -456,45 +456,67 @@ function compactConversationTranscript(convId, thresholdTokens = 80000, force = 
       return { compacted: false, reason: "Conversation too short to compact" };
     }
 
-    const estimatedTokens = Math.round(raw.length / 3.8);
-    if (!force && estimatedTokens < thresholdTokens) {
-      return { compacted: false, reason: "Below token threshold", currentTokens: estimatedTokens };
+    function estimateStepsTokens(stList) {
+      let chars = 0;
+      for (const s of stList) {
+        chars += (s.content || "").length;
+        if (s.thinking) chars += s.thinking.length;
+        if (Array.isArray(s.tool_calls)) {
+          for (const tc of s.tool_calls) {
+            chars += (tc.name || "").length + JSON.stringify(tc.args || {}).length;
+          }
+        }
+      }
+      return Math.max(1, Math.round(chars / 3.6));
+    }
+
+    const steps = [];
+    for (const line of lines) {
+      try {
+        const parsed = JSON.parse(line);
+        if (parsed) steps.push(parsed);
+      } catch (e) {}
+    }
+    if (steps.length === 0) return { compacted: false, reason: "No valid steps" };
+
+    const beforeTokens = estimateStepsTokens(steps);
+    if (!force && beforeTokens < thresholdTokens) {
+      return { compacted: false, reason: "Below token threshold", currentTokens: beforeTokens };
     }
 
     if (!fs.existsSync(fullTranscriptPath)) {
       try { fs.writeFileSync(fullTranscriptPath, raw, "utf-8"); } catch (e) {}
     }
 
-    const steps = [];
-    for (const line of lines) {
-      try { steps.push(JSON.parse(line)); } catch (e) {}
-    }
-
-    if (steps.length === 0) return { compacted: false, reason: "No valid steps" };
-
-    const preserveCount = Math.min(4, steps.length);
+    const preserveCount = Math.min(6, steps.length);
     const splitIndex = steps.length - preserveCount;
     const oldSteps = steps.slice(0, splitIndex);
     const recentSteps = steps.slice(splitIndex);
 
     let prunedCount = 0;
     const compactedOldSteps = oldSteps.map(step => {
-      if (step.tool_calls && Array.isArray(step.tool_calls)) {
-        const prunedCalls = step.tool_calls.map(tc => {
+      const s = { ...step };
+      // Prune heavy tool execution observations (GENERIC type outputs)
+      if (s.type === "GENERIC" && s.content && s.content.length > 200) {
+        prunedCount++;
+        s.content = s.content.slice(0, 150) + "\n... [Çıktı budandı: Tam detay transcript_full.jsonl içinde saklandı]";
+      }
+      // Remove internal thinking logs from old steps
+      if (s.thinking) {
+        delete s.thinking;
+      }
+      // Prune old tool call parameter payloads
+      if (s.tool_calls && Array.isArray(s.tool_calls)) {
+        s.tool_calls = s.tool_calls.map(tc => {
           prunedCount++;
           return {
             name: tc.name,
             state: "done",
-            args: tc.args ? { summary: "[Pruned observation: Archived in full transcript]" } : {}
+            args: tc.args ? { summary: "[Pruned observation]" } : {}
           };
         });
-        return {
-          ...step,
-          thinking: undefined,
-          tool_calls: prunedCalls
-        };
       }
-      return step;
+      return s;
     });
 
     const title = extractSessionTitle(lines);
@@ -510,17 +532,28 @@ function compactConversationTranscript(convId, thresholdTokens = 80000, force = 
     const newContent = newSteps.map(s => JSON.stringify(s)).join("\n") + "\n";
     fs.writeFileSync(transcriptPath, newContent, "utf-8");
 
-    const newEstimatedTokens = Math.round(newContent.length / 3.8);
-    const savedPercent = Math.max(0, Math.round(((estimatedTokens - newEstimatedTokens) / (estimatedTokens || 1)) * 100));
+    const afterTokens = estimateStepsTokens(newSteps);
+    const savedPercent = Math.max(0, Math.round(((beforeTokens - afterTokens) / (beforeTokens || 1)) * 100));
+
+    // Update in-memory session if active
+    if (currentSession && (currentSession.id === convId || currentSession.conversationId === convId)) {
+      if (Array.isArray(currentSession.messages)) {
+        const lastBot = [...currentSession.messages].reverse().find(m => m.role === "bot" && m.usage);
+        if (lastBot && lastBot.usage) {
+          lastBot.usage.total_tokens = afterTokens;
+          lastBot.usage.context_tokens = afterTokens;
+        }
+      }
+    }
 
     const result = {
       compacted: true,
       conversationId: convId,
-      beforeTokens: estimatedTokens,
-      afterTokens: newEstimatedTokens,
+      beforeTokens: beforeTokens,
+      afterTokens: afterTokens,
       savedPercent: savedPercent,
       prunedToolsCount: prunedCount,
-      summary: `Bağlam ${estimatedTokens.toLocaleString()} tok -> ${newEstimatedTokens.toLocaleString()} tok seviyesine indirildi (%${savedPercent} tasarruf).`
+      summary: `Bağlam ${beforeTokens.toLocaleString()} tok -> ${afterTokens.toLocaleString()} tok seviyesine indirildi (%${savedPercent} tasarruf).`
     };
 
     broadcastSSE("compact_completed", result);
