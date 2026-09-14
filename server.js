@@ -243,17 +243,12 @@ async function getBrainConversations(force = false) {
         let createdAt = stats.mtime.toISOString();
         let messageCount = 1;
 
-        let fd = null;
         try {
-          fd = await fs.promises.open(transcriptFile, "r");
-          const buf = Buffer.alloc(32768);
-          const { bytesRead } = await fd.read(buf, 0, 32768, 0);
-          const chunk = buf.toString("utf-8", 0, bytesRead);
-          const lines = chunk.split("\n");
+          const content = await fs.promises.readFile(transcriptFile, "utf-8");
+          const lines = content.split("\n");
           title = extractSessionTitle(lines);
-        } finally {
-          if (fd) await fd.close();
-        }
+          messageCount = Math.max(1, lines.filter(l => l.includes('"USER_INPUT"') || l.includes('"PLANNER_RESPONSE"')).length);
+        } catch (err) {}
 
         brainConversationsCache.set(convId, {
           id: convId,
@@ -506,12 +501,33 @@ function compactConversationTranscript(convId, thresholdTokens = 80000, force = 
   }
 }
 
+function isPlaceholderTitle(title) {
+  if (!title || typeof title !== "string") return true;
+  const clean = title.trim().replace(/^\[|\]$/g, "").trim().toLowerCase();
+  const placeholders = [
+    "kısa ve öz başlık",
+    "kısa ve özbaşlık",
+    "kısa ve öz",
+    "örnek konu başlığı",
+    "örnek başlık",
+    "örnek",
+    "başlık metni",
+    "başlık",
+    "konu başlığı",
+    "antigravity sohbeti",
+    "antigravity ide sohbeti"
+  ];
+  return placeholders.some(p => clean === p || clean.includes("kısa ve öz") || clean.includes("örnek konu"));
+}
+
 function extractSessionTitle(lines) {
   let latestAiTitle = null;
   let fallbackUserTitle = null;
 
-  for (const line of lines) {
-    if (!line.trim()) continue;
+  // 1. Search from newest line to oldest for the latest valid AI title sentinel tag
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (!line || !line.trim()) continue;
     try {
       const step = JSON.parse(line);
       if (step.type === "PLANNER_RESPONSE" || step.type === "MODEL") {
@@ -519,24 +535,37 @@ function extractSessionTitle(lines) {
         const m = botContent.match(/<!--__AGY_SESSION_TITLE:\s*([^\n\r]+?)\s*__-->/) ||
                   botContent.match(/<!--SESSION_TITLE:\s*([^\n\r]+?)\s*-->/);
         if (m && m[1]) {
-          latestAiTitle = m[1].trim();
-        }
-      } else if (step.type === "USER_INPUT" && !fallbackUserTitle) {
-        let clean = step.content || "";
-        const reqMatch = clean.match(/<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>/);
-        if (reqMatch && reqMatch[1]) clean = reqMatch[1];
-        // Strip out metadata and environment prefixes
-        clean = clean.replace(/\[Ortam Bilgisi[^\]]*\]/gi, "");
-        clean = clean.replace(/\[Mobil Önizleme[^\]]*\]/gi, "");
-        clean = clean.replace(/\[Ek Metin[^\]]*\]/gi, "");
-        clean = clean.replace(/\[Ek Görsel[^\]]*\]/gi, "");
-        clean = clean.replace(/\[Eklenen Dosya[^\]]*\]/gi, "");
-        clean = clean.replace(/<[^>]+>/g, "").trim().replace(/\s+/g, " ");
-        if (clean) {
-          fallbackUserTitle = clean.length > 45 ? clean.slice(0, 45) + "…" : clean;
+          const candidate = m[1].trim();
+          if (!isPlaceholderTitle(candidate)) {
+            latestAiTitle = candidate;
+            break; // Found the latest genuine title!
+          }
         }
       }
     } catch (e) {}
+  }
+
+  // 2. If no valid AI title sentinel tag, fallback to the first meaningful user request
+  if (!latestAiTitle) {
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (!line || !line.trim()) continue;
+      try {
+        const step = JSON.parse(line);
+        if (step.type === "USER_INPUT") {
+          let clean = step.content || "";
+          const reqMatch = clean.match(/<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>/);
+          if (reqMatch && reqMatch[1]) clean = reqMatch[1];
+          // Strip bracketed environment/metadata blocks
+          clean = clean.replace(/\[[\s\S]*?\]/g, "");
+          clean = clean.replace(/<[^>]+>/g, "").trim().replace(/\s+/g, " ");
+          if (clean && clean.length > 2 && !isPlaceholderTitle(clean)) {
+            fallbackUserTitle = clean.length > 45 ? clean.slice(0, 45) + "…" : clean;
+            break;
+          }
+        }
+      } catch (e) {}
+    }
   }
 
   return latestAiTitle || fallbackUserTitle || "Antigravity Sohbeti";
@@ -2421,6 +2450,23 @@ const server = http.createServer(async (req, res) => {
 
             const isSuccess = lastResultStatus === "SUCCESS";
             const failed = !isSuccess || killedByWatchdog;
+
+            // Extract AI session title if present in botMessage.content
+            if (activeConvId && botMessage.content) {
+              const m = botMessage.content.match(/<!--__AGY_SESSION_TITLE:\s*([^\n\r]+?)\s*__-->/) ||
+                        botMessage.content.match(/<!--SESSION_TITLE:\s*([^\n\r]+?)\s*-->/);
+              if (m && m[1]) {
+                const newTitle = m[1].trim();
+                if (!isPlaceholderTitle(newTitle)) {
+                  currentSession.title = newTitle;
+                  const cached = brainConversationsCache.get(activeConvId);
+                  if (cached) {
+                    cached.title = newTitle;
+                    brainConversationsCache.set(activeConvId, cached);
+                  }
+                }
+              }
+            }
 
             if (failed) {
               let errMsg = lastResultError;
