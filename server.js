@@ -377,6 +377,48 @@ function broadcastSSE(event, data) {
   } catch (e) {}
 }
 
+function getImageMetadataAndOptimize(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) return null;
+  const ext = path.extname(filePath).toLowerCase();
+  const isImage = [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"].includes(ext);
+  if (!isImage) return null;
+
+  try {
+    const stats = fs.statSync(filePath);
+    let metaStr = `Boyut: ${Math.round(stats.size / 1024)} KB`;
+    let width = null;
+    let height = null;
+
+    const buffer = fs.readFileSync(filePath);
+    if (ext === ".png" && buffer.length >= 24) {
+      width = buffer.readUInt32BE(16);
+      height = buffer.readUInt32BE(20);
+      metaStr += `, Çözünürlük: ${width}x${height} px`;
+    } else if ((ext === ".jpg" || ext === ".jpeg") && buffer.length > 4) {
+      let offset = 2;
+      while (offset < buffer.length - 8) {
+        if (buffer[offset] === 0xFF && (buffer[offset + 1] >= 0xC0 && buffer[offset + 1] <= 0xC3)) {
+          height = buffer.readUInt16BE(offset + 5);
+          width = buffer.readUInt16BE(offset + 7);
+          metaStr += `, Çözünürlük: ${width}x${height} px`;
+          break;
+        }
+        offset++;
+      }
+    }
+    metaStr += `, Tarih: ${stats.mtime.toISOString().replace("T", " ").substring(0, 19)}`;
+    return {
+      size: stats.size,
+      width: width,
+      height: height,
+      metaStr: metaStr,
+      isImage: true
+    };
+  } catch (e) {
+    return null;
+  }
+}
+
 function compactConversationTranscript(convId, thresholdTokens = 80000, force = false) {
   if (!convId) return { compacted: false, reason: "No conversation ID" };
   const transcriptPath = path.join(BRAIN_DIR, convId, ".system_generated/logs/transcript.jsonl");
@@ -1280,6 +1322,8 @@ const server = http.createServer(async (req, res) => {
         try { fs.writeFileSync(workspaceCopy, buffer); } catch(e) {}
 
         const relPath = "uploads/" + fileName;
+        const imgMeta = getImageMetadataAndOptimize(filePath);
+
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({
           status: "ok",
@@ -1288,7 +1332,10 @@ const server = http.createServer(async (req, res) => {
           relPath: relPath,
           workspacePath: workspaceCopy,
           size: buffer.length,
-          type: type || "file"
+          type: type || "file",
+          metadata: imgMeta ? imgMeta.metaStr : null,
+          width: imgMeta ? imgMeta.width : null,
+          height: imgMeta ? imgMeta.height : null
         }));
       } catch (e) {
         res.writeHead(500, { "Content-Type": "application/json" });
@@ -1951,9 +1998,11 @@ const server = http.createServer(async (req, res) => {
             const num = idx + 1;
             const safePath = a.path || path.join(UPLOADS_DIR, a.name);
             const tagRegex = new RegExp(`\\[(image|resim|görsel|dosya|file|doc|ek)[-_]?${num}\\]`, "gi");
+            const imgMeta = getImageMetadataAndOptimize(safePath);
+            const metaSuffix = imgMeta ? ` (Meta: ${imgMeta.metaStr})` : "";
             
             if (tagRegex.test(prompt)) {
-              prompt = prompt.replace(tagRegex, `[Ek Görsel/Dosya #${num} (${a.name}): ${safePath}]`);
+              prompt = prompt.replace(tagRegex, `[Ek Görsel/Dosya #${num} (${a.name}): ${safePath}${metaSuffix}]`);
             } else if (prompt.includes(safePath) || (a.name && prompt.includes(a.name))) {
               // Zaten metin içinde dosya yolundan veya adından açıkça bahsedilmiş
             } else {
@@ -1964,7 +2013,9 @@ const server = http.createServer(async (req, res) => {
           if (unreferencedAttachments.length > 0) {
             const fileRefs = unreferencedAttachments.map(a => {
               const safePath = a.path || path.join(UPLOADS_DIR, a.name);
-              return "[Eklenen Dosya/Resim: " + safePath + "] (Adı: " + a.name + ")";
+              const imgMeta = getImageMetadataAndOptimize(safePath);
+              const metaSuffix = imgMeta ? ` [Meta: ${imgMeta.metaStr}]` : "";
+              return "[Eklenen Dosya/Resim: " + safePath + "] (Adı: " + a.name + ")" + metaSuffix;
             }).join("\n");
 
             attachmentNotice = "\n\nKullanıcının mesaja eklediği diğer dosya ve görseller:\n" + fileRefs + "\nLütfen ekteki bu dosya/görselleri de analiz ederek yanıt verin.";
