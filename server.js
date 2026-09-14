@@ -731,6 +731,58 @@ function scanInstalledSkills() {
   return Array.from(skillsMap.values()).sort((a, b) => a.name.localeCompare(b.name));
 }
 
+function scanInstalledMcpServers() {
+  const mcpList = [];
+  const configFile = path.join(process.env.HOME || "/data/data/com.termux/files/home", ".gemini/config/mcp_config.json");
+  const mcpSchemaDir = path.join(process.env.HOME || "/data/data/com.termux/files/home", ".gemini/antigravity-cli/mcp");
+
+  const descriptions = {
+    "groundtruth": { desc: "445+ kütüphane için çevrimdışı dökümantasyon ve kod denetimi", icon: "📚" },
+    "design-token-bridge": { desc: "Tasarım token'larını Material 3 Jetpack Compose'a çevirici", icon: "🎨" },
+    "reuse-before-generate": { desc: "Kod yazmadan önce GitHub/npm/PyPI açık kaynak alternatif arayıcı", icon: "♻️" },
+    "nakkas": { desc: "Yapay zeka SVG vektör çizim ve animasyon motoru", icon: "🖋️" },
+    "figma": { desc: "Figma REST API ve bileşen okuyucu", icon: "📐" },
+    "gamedev": { desc: "Oyun motoru dökümantasyon ve karşılaştırma aracı", icon: "🎮" },
+    "jcodemunch": { desc: "AST sembol arama ve mimari repo haritası", icon: "🔍" },
+    "love2d": { desc: "Love2D Lua oyun geliştirme ve çalıştırma", icon: "🕹️" },
+    "qwen": { desc: "Qwen AI modelleri ve multimodal medya köprüsü", icon: "🤖" },
+    "stitch": { desc: "Google Stitch UI üretim ve tasarım sistemi", icon: "⚡" },
+    "codevibe-antigravity": { desc: "CodeVibe mobil oturum köprüsü", icon: "📱" },
+    "icons8mcp": { desc: "Icons8 görsel ve ikon arama sunucusu", icon: "🖼️" },
+    "google-flow": { desc: "Medya ve tarayıcı otomasyon motoru", icon: "🌊" }
+  };
+
+  try {
+    if (fs.existsSync(configFile)) {
+      const cfg = JSON.parse(fs.readFileSync(configFile, "utf8"));
+      if (cfg.mcpServers) {
+        for (const [name, serverDef] of Object.entries(cfg.mcpServers)) {
+          let tools = [];
+          const serverDir = path.join(mcpSchemaDir, name);
+          if (fs.existsSync(serverDir)) {
+            try {
+              tools = fs.readdirSync(serverDir)
+                .filter(f => f.endsWith(".json"))
+                .map(f => f.replace(".json", ""));
+            } catch(e) {}
+          }
+          const info = descriptions[name] || { desc: "MCP Sunucusu", icon: "⚡" };
+          mcpList.push({
+            name,
+            icon: info.icon,
+            description: info.desc,
+            command: `/mcp:${name}`,
+            toolsCount: tools.length,
+            tools: tools
+          });
+        }
+      }
+    }
+  } catch(e) {}
+
+  return mcpList.sort((a, b) => a.name.localeCompare(b.name));
+}
+
 // File System & Project Detection Helpers
 function getMimeType(filePath) {
   const ext = path.extname(filePath).toLowerCase();
@@ -1409,6 +1461,14 @@ const server = http.createServer(async (req, res) => {
     const skills = scanInstalledSkills();
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ status: "ok", count: skills.length, skills }));
+    return;
+  }
+
+  // MCP Servers & Tools List
+  if (pathname === "/api/mcps" && req.method === "GET") {
+    const mcps = scanInstalledMcpServers();
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ status: "ok", count: mcps.length, mcps }));
     return;
   }
 
@@ -2166,7 +2226,9 @@ const server = http.createServer(async (req, res) => {
 4. Uyarı & Vurgu Kutuları: GitHub callout formatını kullanın (> [!NOTE], > [!TIP], > [!IMPORTANT], > [!WARNING], > [!CAUTION]). Mobil uygulama bunları ikonlu ve renkli kutular olarak render eder.
 5. Mermaid Şemaları: Akış şemalarında dikey mobil ekrana tam sığması ve yatay kaydırma gerektirmemesi için KESİNLİKLE dikey yönlendirme (\`flowchart TD\` veya \`graph TD\`) kullanın; yatay (\`flowchart LR\`, \`graph LR\`, \`RL\`) şemalar KESİNLİKLE KULLANILMAMALIDIR.
 6. Tablolar & Veri Listeleri: Mobil ekranda yatay taşmayı önlemek için geniş çok kolonlu tablolardan kaçının; dikey anahtar-değer madde listeleri veya en fazla 2 kolonlu kompakt tablolar tercih edin. Kod parçalarını ise dil etiketli (\`\`\`kotlin, \`\`\`javascript, \`\`\`bash vb.) fenced block olarak sunun.
-7. Net & Mobil Uyumlu Çıktı: Mobil ekran okunabilirliği için gereksiz dolgu metinlerinden kaçının, net ve yapılandırılmış bilgi sunun.]\n\n`;
+7. Net & Mobil Uyumlu Çıktı: Mobil ekran okunabilirliği için gereksiz dolgu metinlerinden kaçının, net ve yapılandırılmış bilgi sunun.
+8. Etkileşimli Seçim ve Soru Kartları: Kullanıcıya seçenekli bir soru yöneltirken seçenekleri numaralı liste veya şıklar halinde sunun; kullanıcı doğrudan kart üzerinden dokunarak seçebilir veya "✍️ Yazarak Yanıtla" ile serbest yanıt girebilir.
+9. İnteraktif Çoklu Seçim ve Tikli Liste Kartları: Kullanıcıya kurulacak paketler, MCP sunucuları, düzenlenecek dosyalar veya uygulanacak adımlar gibi çoklu seçenekler sunarken maddeleri standart Markdown checklist formatında (\`- [ ] Seçenek 1\`, \`- [ ] Seçenek 2\`) verin. Mobil uygulama bu listeyi dokunulabilir onay kutuları ve altında "Seçilenleri Gönder" butonu içeren interaktif bir seçim kartı olarak render eder.]\n\n`;
         }
 
         const fullPromptForAgy = (clientContextInstruction + prompt + attachmentNotice).trim();
