@@ -246,28 +246,11 @@ async function getBrainConversations(force = false) {
         let fd = null;
         try {
           fd = await fs.promises.open(transcriptFile, "r");
-          const buf = Buffer.alloc(16384);
-          const { bytesRead } = await fd.read(buf, 0, 16384, 0);
+          const buf = Buffer.alloc(32768);
+          const { bytesRead } = await fd.read(buf, 0, 32768, 0);
           const chunk = buf.toString("utf-8", 0, bytesRead);
           const lines = chunk.split("\n");
-
-          for (const line of lines) {
-            if (!line.trim()) continue;
-            try {
-              const step = JSON.parse(line);
-              if (step.type === "USER_INPUT") {
-                if (title === "Antigravity IDE Sohbeti" && step.content) {
-                  let clean = step.content;
-                  const reqMatch = clean.match(/<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>/);
-                  if (reqMatch && reqMatch[1]) clean = reqMatch[1];
-                  clean = clean.replace(/<[^>]+>/g, "").trim().replace(/\s+/g, " ");
-                  if (clean) title = clean.length > 45 ? clean.slice(0, 45) + "…" : clean;
-                  if (step.created_at) createdAt = step.created_at;
-                  break;
-                }
-              }
-            } catch (e) {}
-          }
+          title = extractSessionTitle(lines);
         } finally {
           if (fd) await fd.close();
         }
@@ -306,7 +289,7 @@ async function loadBrainConversation(id) {
     const content = await fs.promises.readFile(transcriptFile, "utf-8");
     const lines = content.split("\n").filter(l => l.trim().length > 0);
     const messages = [];
-    let title = "Antigravity IDE Sohbeti";
+    const title = extractSessionTitle(lines);
 
     for (const line of lines) {
       try {
@@ -318,9 +301,6 @@ async function loadBrainConversation(id) {
             text = reqMatch[1].trim();
           } else {
             text = text.replace(/<[^>]+>/g, "").trim();
-          }
-          if (title === "Antigravity IDE Sohbeti" && text) {
-            title = text.length > 45 ? text.slice(0, 45) + "…" : text;
           }
           messages.push({
             role: "user",
@@ -397,19 +377,56 @@ function broadcastSSE(event, data) {
   } catch (e) {}
 }
 
-function getVaultFiles(dirPath, baseRelative = "") {
+function extractSessionTitle(lines) {
+  let latestAiTitle = null;
+  let fallbackUserTitle = null;
+
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    try {
+      const step = JSON.parse(line);
+      if (step.type === "PLANNER_RESPONSE" || step.type === "MODEL") {
+        const botContent = step.content || "";
+        const m = botContent.match(/<!--__AGY_SESSION_TITLE:\s*([^\n\r]+?)\s*__-->/) ||
+                  botContent.match(/<!--SESSION_TITLE:\s*([^\n\r]+?)\s*-->/);
+        if (m && m[1]) {
+          latestAiTitle = m[1].trim();
+        }
+      } else if (step.type === "USER_INPUT" && !fallbackUserTitle) {
+        let clean = step.content || "";
+        const reqMatch = clean.match(/<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>/);
+        if (reqMatch && reqMatch[1]) clean = reqMatch[1];
+        // Strip out metadata and environment prefixes
+        clean = clean.replace(/\[Ortam Bilgisi[^\]]*\]/gi, "");
+        clean = clean.replace(/\[Mobil Önizleme[^\]]*\]/gi, "");
+        clean = clean.replace(/\[Ek Metin[^\]]*\]/gi, "");
+        clean = clean.replace(/\[Ek Görsel[^\]]*\]/gi, "");
+        clean = clean.replace(/\[Eklenen Dosya[^\]]*\]/gi, "");
+        clean = clean.replace(/<[^>]+>/g, "").trim().replace(/\s+/g, " ");
+        if (clean) {
+          fallbackUserTitle = clean.length > 45 ? clean.slice(0, 45) + "…" : clean;
+        }
+      }
+    } catch (e) {}
+  }
+
+  return latestAiTitle || fallbackUserTitle || "Antigravity Sohbeti";
+}
+
+function getVaultFiles(dirPath, baseRelative = "", maxDepth = 6) {
   let results = [];
   try {
     if (!fs.existsSync(dirPath)) return results;
     const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    const IGNORE_DIRS = new Set([".git", ".obsidian", ".stitch", ".cache", "node_modules", "dist", "build", ".gradle"]);
     for (const entry of entries) {
-      if (entry.name.startsWith(".")) continue;
+      if (IGNORE_DIRS.has(entry.name) || (entry.name.startsWith(".") && entry.name !== ".agents")) continue;
       const rel = baseRelative ? (baseRelative + "/" + entry.name) : entry.name;
       const full = path.join(dirPath, entry.name);
       if (entry.isDirectory()) {
         results.push({ name: entry.name, path: rel, isDirectory: true });
-        if (!baseRelative.includes("/")) {
-          results = results.concat(getVaultFiles(full, rel));
+        if (maxDepth > 0) {
+          results = results.concat(getVaultFiles(full, rel, maxDepth - 1));
         }
       } else {
         const stats = fs.statSync(full);
