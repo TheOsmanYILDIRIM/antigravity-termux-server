@@ -313,12 +313,17 @@ async function loadBrainConversation(id) {
         const step = JSON.parse(line);
         if (step.type === "USER_INPUT") {
           let text = step.content || "";
+          // Skip internal framework system messages (task notifications, timer wakeups)
+          if (!text.includes("<USER_REQUEST>") && (text.includes("<SYSTEM_MESSAGE>") || text.includes("[Message] timestamp="))) {
+            continue;
+          }
           const reqMatch = text.match(/<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>/);
           if (reqMatch && reqMatch[1]) {
             text = reqMatch[1].trim();
           } else {
-            text = text.replace(/<[^>]+>/g, "").trim();
+            text = text.replace(/<SYSTEM_MESSAGE>[\s\S]*?<\/SYSTEM_MESSAGE>/g, "").replace(/<[^>]+>/g, "").trim();
           }
+          if (!text) continue;
           messages.push({
             role: "user",
             content: text,
