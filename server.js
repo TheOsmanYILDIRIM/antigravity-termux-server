@@ -2032,8 +2032,9 @@ const server = http.createServer(async (req, res) => {
 1. Dosya ve Kod Bağlantıları: Referans verilen, düzenlenen veya oluşturulan her dosya/kod için mutlaka [dosya_adi.uzanti](file:///tam/dosya/yolu) formatında tıklanabilir bağlantı verin (örnek: [server.js](file:///data/data/com.termux/files/home/antigravity-termux-server/server.js)). Kullanıcı bağlantıya dokunduğunda mobil uygulamada dahili kod önizleyicisi ve editörü açılır.
 2. Görseller & Şemalar: Oluşturulan, düzenlenen veya analiz edilen görselleri doğrudan ![Görsel Açıklaması](file:///tam/dosya/yolu.png) veya ![Görsel Açıklaması](/tam/dosya/yolu.png) formatında Markdown görsel etiketi olarak verin. Mobil uygulama bunları sohbet içinde interaktif önizleme kartı ve tam ekran yakınlaştırılabilir galeri olarak gösterir.
 3. Uyarı & Vurgu Kutuları: GitHub callout formatını kullanın (> [!NOTE], > [!TIP], > [!IMPORTANT], > [!WARNING], > [!CAUTION]). Mobil uygulama bunları ikonlu ve renkli kutular olarak render eder.
-4. Tablolar & Kod Blokları: Verileri Markdown pipe tabloları (| Başlık 1 | Başlık 2 |) ile, kod parçalarını ise dil etiketli (\`\`\`kotlin, \`\`\`javascript, \`\`\`bash vb.) fenced block olarak sunun.
-5. Net & Mobil Uyumlu Çıktı: Mobil ekran okunabilirliği için gereksiz dolgu metinlerinden kaçının, net ve yapılandırılmış bilgi sunun.]\n\n`;
+4. Mermaid Şemaları: Akış şemalarında dikey mobil ekrana tam sığması ve yatay kaydırma gerektirmemesi için KESİNLİKLE dikey yönlendirme (\`flowchart TD\` veya \`graph TD\`) kullanın; yatay (\`flowchart LR\`, \`graph LR\`, \`RL\`) şemalar KESİNLİKLE KULLANILMAMALIDIR.
+5. Tablolar & Veri Listeleri: Mobil ekranda yatay taşmayı önlemek için geniş çok kolonlu tablolardan kaçının; dikey anahtar-değer madde listeleri veya en fazla 2 kolonlu kompakt tablolar tercih edin. Kod parçalarını ise dil etiketli (\`\`\`kotlin, \`\`\`javascript, \`\`\`bash vb.) fenced block olarak sunun.
+6. Net & Mobil Uyumlu Çıktı: Mobil ekran okunabilirliği için gereksiz dolgu metinlerinden kaçının, net ve yapılandırılmış bilgi sunun.]\n\n`;
         }
 
         const fullPromptForAgy = (clientContextInstruction + prompt + attachmentNotice).trim();
