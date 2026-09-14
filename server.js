@@ -218,6 +218,8 @@ setInterval(() => {
 const brainConversationsCache = new Map();
 let isScanningConversations = false;
 
+const subagentConversationIds = new Set();
+
 async function getBrainConversations(force = false) {
   if (!fs.existsSync(BRAIN_DIR)) return [];
   if (isScanningConversations && brainConversationsCache.size > 0 && !force) {
@@ -227,6 +229,24 @@ async function getBrainConversations(force = false) {
   isScanningConversations = true;
   try {
     const entries = await fs.promises.readdir(BRAIN_DIR, { withFileTypes: true });
+
+    // 1. Discover all subagent IDs referenced in any transcript
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const tFile = path.join(BRAIN_DIR, entry.name, ".system_generated/logs/transcript.jsonl");
+      if (!fs.existsSync(tFile)) continue;
+      try {
+        const txt = await fs.promises.readFile(tFile, "utf-8");
+        const m = txt.matchAll(/conversationId[\\"]*:\s*[\\"]*([0-9a-fA-F\-]{36})/g);
+        for (const match of m) {
+          if (match[1] !== entry.name) {
+            subagentConversationIds.add(match[1]);
+          }
+        }
+      } catch (e) {}
+    }
+
+    // 2. Scan and cache conversation metadata
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       const convId = entry.name;
@@ -236,6 +256,7 @@ async function getBrainConversations(force = false) {
         const stats = await fs.promises.stat(transcriptFile);
         const cached = brainConversationsCache.get(convId);
         if (cached && cached.mtimeMs === stats.mtimeMs && cached.size === stats.size && !force) {
+          cached.isSubagent = subagentConversationIds.has(convId);
           continue;
         }
 
@@ -257,7 +278,8 @@ async function getBrainConversations(force = false) {
           lastMessageTime: stats.mtime.toISOString(),
           messageCount: messageCount,
           mtimeMs: stats.mtimeMs,
-          size: stats.size
+          size: stats.size,
+          isSubagent: subagentConversationIds.has(convId)
         });
       } catch (err) {}
     }
@@ -1664,7 +1686,9 @@ const server = http.createServer(async (req, res) => {
   if (pathname === "/api/conversations" && req.method === "GET") {
     const list = await getBrainConversations();
     const activeConvId = currentSession.conversationId || currentSession.id;
-    const enrichedList = list.map(c => ({
+    const includeSubagents = (req.url && (req.url.includes("includeSubagents=true") || req.url.includes("all=true")));
+    const filteredList = includeSubagents ? list : list.filter(c => !c.isSubagent);
+    const enrichedList = filteredList.map(c => ({
       ...c,
       isGenerating: Boolean(currentSession.isGenerating && (activeConvId === c.id))
     }));
