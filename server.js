@@ -2192,7 +2192,10 @@ const server = http.createServer(async (req, res) => {
           const unreferencedAttachments = [];
           attachments.forEach((a, idx) => {
             const num = idx + 1;
-            const safePath = a.path || path.join(UPLOADS_DIR, a.name);
+            let safePath = a.path;
+            if (!safePath || safePath.startsWith("/data/user/") || safePath.startsWith("/data/data/com.antigravity") || !safePath.startsWith("/data/data/com.termux/files/")) {
+              safePath = path.join(UPLOADS_DIR, a.name ? path.basename(a.name) : "attachment");
+            }
             const tagRegex = new RegExp(`\\[(image|resim|görsel|dosya|file|doc|ek)[-_]?${num}\\]`, "gi");
             const imgMeta = getImageMetadataAndOptimize(safePath);
             const metaSuffix = imgMeta ? ` (Meta: ${imgMeta.metaStr})` : "";
@@ -2202,13 +2205,13 @@ const server = http.createServer(async (req, res) => {
             } else if (prompt.includes(safePath) || (a.name && prompt.includes(a.name))) {
               // Zaten metin içinde dosya yolundan veya adından açıkça bahsedilmiş
             } else {
-              unreferencedAttachments.push(a);
+              unreferencedAttachments.push({ ...a, resolvedPath: safePath });
             }
           });
 
           if (unreferencedAttachments.length > 0) {
             const fileRefs = unreferencedAttachments.map(a => {
-              const safePath = a.path || path.join(UPLOADS_DIR, a.name);
+              const safePath = a.resolvedPath || a.path || path.join(UPLOADS_DIR, a.name);
               const imgMeta = getImageMetadataAndOptimize(safePath);
               const metaSuffix = imgMeta ? ` [Meta: ${imgMeta.metaStr}]` : "";
               return "[Eklenen Dosya/Resim: " + safePath + "] (Adı: " + a.name + ")" + metaSuffix;
