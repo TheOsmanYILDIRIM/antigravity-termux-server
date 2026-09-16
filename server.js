@@ -313,6 +313,38 @@ setInterval(() => {
   getBrainConversations().catch(() => {});
 }, 30000);
 
+function cleanUserRequestContent(rawText) {
+  if (!rawText) return "";
+  let text = rawText;
+  
+  // Extract <USER_REQUEST>
+  const reqMatch = text.match(/<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>/);
+  if (reqMatch && reqMatch[1]) {
+    text = reqMatch[1].trim();
+  }
+
+  // Strip XML blocks
+  text = text.replace(/<SYSTEM_MESSAGE>[\s\S]*?<\/SYSTEM_MESSAGE>/g, "")
+             .replace(/<ADDITIONAL_METADATA>[\s\S]*?<\/ADDITIONAL_METADATA>/g, "")
+             .replace(/<USER_SETTINGS_CHANGE>[\s\S]*?<\/USER_SETTINGS_CHANGE>/g, "")
+             .replace(/<[^>]+>/g, "");
+
+  // If prompt starts with [Ortam Bilgisi or [Mobil Önizleme, strip the entire instruction preface
+  if (text.startsWith("[")) {
+    const lastRuleEnd = text.lastIndexOf("]\n");
+    if (lastRuleEnd >= 0) {
+      text = text.slice(lastRuleEnd + 2);
+    } else {
+      const altRuleEnd = text.lastIndexOf("]");
+      if (altRuleEnd >= 0 && altRuleEnd < text.length - 5) {
+        text = text.slice(altRuleEnd + 1);
+      }
+    }
+  }
+
+  return text.trim();
+}
+
 async function loadBrainConversation(id) {
   if (!id) return null;
   const transcriptFile = path.join(BRAIN_DIR, id, ".system_generated/logs/transcript.jsonl");
@@ -325,29 +357,37 @@ async function loadBrainConversation(id) {
     const title = extractSessionTitle(lines);
     const projectName = extractSessionProject(lines);
 
+    let currentTurnBot = null;
+
     for (const line of lines) {
       try {
         const step = JSON.parse(line);
-        if (step.type === "USER_INPUT") {
-          let text = step.content || "";
-          // Skip internal framework system messages (task notifications, timer wakeups)
-          if (!text.includes("<USER_REQUEST>") && (text.includes("<SYSTEM_MESSAGE>") || text.includes("[Message] timestamp="))) {
-            continue;
+
+        // Skip compact state anchors
+        if (step.type === "COMPACT_STATE") continue;
+
+        if (step.type === "USER_INPUT" || step.type === "SYSTEM_MESSAGE") {
+          const rawContent = step.content || "";
+          const isSystemEvent = rawContent.includes("<SYSTEM_MESSAGE>") || rawContent.includes("[Message] timestamp=");
+          const cleanUserText = cleanUserRequestContent(rawContent);
+
+          // Finalize previous bot turn before starting new turn
+          if (currentTurnBot) {
+            if (currentTurnBot.content || (currentTurnBot.tools && currentTurnBot.tools.length > 0)) {
+              messages.push(currentTurnBot);
+            }
+            currentTurnBot = null;
           }
-          const reqMatch = text.match(/<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>/);
-          if (reqMatch && reqMatch[1]) {
-            text = reqMatch[1].trim();
-          } else {
-            text = text.replace(/<SYSTEM_MESSAGE>[\s\S]*?<\/SYSTEM_MESSAGE>/g, "").replace(/<[^>]+>/g, "").trim();
+
+          if (!isSystemEvent && cleanUserText.length > 0) {
+            messages.push({
+              role: "user",
+              content: cleanUserText,
+              time: step.created_at || new Date().toISOString()
+            });
           }
-          if (!text) continue;
-          messages.push({
-            role: "user",
-            content: text,
-            time: step.created_at || new Date().toISOString()
-          });
         } else if (step.type === "PLANNER_RESPONSE" || step.type === "MODEL") {
-          let botContent = step.content || "";
+          const botContent = (step.content || "").trim();
           const tools = [];
           if (step.tool_calls && Array.isArray(step.tool_calls)) {
             step.tool_calls.forEach(tc => {
@@ -360,31 +400,9 @@ async function loadBrainConversation(id) {
             });
           }
 
-          const lastMsg = messages.length > 0 ? messages[messages.length - 1] : null;
-          if (lastMsg && lastMsg.role === "bot") {
-            // Merge into existing bot turn
-            if (botContent) {
-              if (lastMsg.content) lastMsg.content += "\n\n" + botContent;
-              else lastMsg.content = botContent;
-            }
-            if (tools.length > 0) {
-              if (!Array.isArray(lastMsg.tools)) lastMsg.tools = [];
-              lastMsg.tools.push(...tools);
-            }
-            let totalChars = (lastMsg.content || "").length + JSON.stringify(lastMsg.tools || []).length;
-            let turnTok = Math.max(1, Math.round(totalChars / 3.6));
-            lastMsg.usage = {
-              turn_tokens: turnTok,
-              context_tokens: turnTok,
-              total_tokens: turnTok,
-              input_tokens: 0,
-              output_tokens: Math.max(1, Math.round((lastMsg.content || "").length / 3.6))
-            };
-            lastMsg.time = step.created_at || lastMsg.time;
-          } else {
-            // New bot turn
+          if (!currentTurnBot) {
             let turnTok = Math.max(1, Math.round((botContent.length + JSON.stringify(tools).length) / 3.6));
-            messages.push({
+            currentTurnBot = {
               role: "bot",
               content: botContent,
               tools: tools,
@@ -397,10 +415,48 @@ async function loadBrainConversation(id) {
               },
               time: step.created_at || new Date().toISOString(),
               state: "done"
-            });
+            };
+          } else {
+            // Merge tools in the current turn
+            if (tools.length > 0) {
+              if (!Array.isArray(currentTurnBot.tools)) currentTurnBot.tools = [];
+              currentTurnBot.tools.push(...tools);
+            }
+
+            if (botContent) {
+              if (!currentTurnBot.content) {
+                currentTurnBot.content = botContent;
+              } else {
+                const prevIsInterim = currentTurnBot.content.length < 180 && !currentTurnBot.content.includes("###") && !currentTurnBot.content.includes("<!--__AGY");
+                const newIsFull = botContent.includes("###") || botContent.includes("<!--__AGY") || botContent.length > currentTurnBot.content.length;
+
+                if (prevIsInterim && newIsFull) {
+                  currentTurnBot.content = botContent;
+                } else if (!currentTurnBot.content.includes(botContent)) {
+                  currentTurnBot.content += "\n\n" + botContent;
+                }
+              }
+            }
+
+            let totalChars = (currentTurnBot.content || "").length + JSON.stringify(currentTurnBot.tools || []).length;
+            let turnTok = Math.max(1, Math.round(totalChars / 3.6));
+            currentTurnBot.usage = {
+              turn_tokens: turnTok,
+              context_tokens: turnTok,
+              total_tokens: turnTok,
+              input_tokens: 0,
+              output_tokens: Math.max(1, Math.round((currentTurnBot.content || "").length / 3.6))
+            };
+            currentTurnBot.time = step.created_at || currentTurnBot.time;
           }
         }
       } catch (e) {}
+    }
+
+    if (currentTurnBot) {
+      if (currentTurnBot.content || (currentTurnBot.tools && currentTurnBot.tools.length > 0)) {
+        messages.push(currentTurnBot);
+      }
     }
 
     // Post-process messages to assign accurate cumulative context_tokens
