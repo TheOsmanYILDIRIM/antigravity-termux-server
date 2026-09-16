@@ -33,6 +33,7 @@ if (!fs.existsSync(SESSIONS_DIR)) fs.mkdirSync(SESSIONS_DIR, { recursive: true }
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 if (!fs.existsSync(VAULT_DIR)) fs.mkdirSync(VAULT_DIR, { recursive: true });
 
+const activeProcesses = new Map();
 let activeChildProcess = null;
 let authWaitingChildProcess = null;
 let pendingPkce = null;
@@ -2286,24 +2287,47 @@ const server = http.createServer(async (req, res) => {
 
   // Stop Generation (Guaranteed Immediate Kill)
   if (pathname === "/api/stop" && req.method === "POST") {
-    manualStop = true;
-    if (activeChildProcess) {
-      const pid = activeChildProcess.pid;
-      try {
-        if (pid) {
-          exec(`pkill -9 -P ${pid} 2>/dev/null; kill -9 ${pid} 2>/dev/null || true`);
-        }
-        activeChildProcess.kill("SIGKILL");
-      } catch (e) {}
-      activeChildProcess = null;
-    }
-    const activeConvId = currentSession.conversationId || currentSession.id;
-    currentSession.isGenerating = false;
-    broadcastSSE("generating_done", { conversationId: activeConvId, isGenerating: false });
-    broadcastSSE("stopped", { message: "İşlem durduruldu.", conversationId: activeConvId });
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", () => {
+      let data = {};
+      try { data = JSON.parse(body || "{}"); } catch (e) {}
+      const targetConvId = data.conversationId;
 
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ status: "ok", message: "İşlem anında durduruldu." }));
+      manualStop = true;
+      if (targetConvId && activeProcesses.has(targetConvId)) {
+        const proc = activeProcesses.get(targetConvId);
+        if (proc && proc.child && proc.child.pid) {
+          try {
+            exec(`pkill -9 -P ${proc.child.pid} 2>/dev/null; kill -9 ${proc.child.pid} 2>/dev/null || true`);
+            proc.child.kill("SIGKILL");
+          } catch (e) {}
+        }
+        activeProcesses.delete(targetConvId);
+        broadcastSSE("generating_done", { conversationId: targetConvId, isGenerating: false });
+        broadcastSSE("stopped", { message: "İşlem durduruldu.", conversationId: targetConvId });
+      } else {
+        for (const [cId, proc] of activeProcesses.entries()) {
+          if (proc && proc.child && proc.child.pid) {
+            try {
+              exec(`pkill -9 -P ${proc.child.pid} 2>/dev/null; kill -9 ${proc.child.pid} 2>/dev/null || true`);
+              proc.child.kill("SIGKILL");
+            } catch (e) {}
+          }
+          broadcastSSE("generating_done", { conversationId: cId, isGenerating: false });
+          broadcastSSE("stopped", { message: "İşlem durduruldu.", conversationId: cId });
+        }
+        activeProcesses.clear();
+        if (activeChildProcess) {
+          try { activeChildProcess.kill("SIGKILL"); } catch (e) {}
+          activeChildProcess = null;
+        }
+      }
+      currentSession.isGenerating = false;
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "ok", message: "İşlem durduruldu." }));
+    });
     return;
   }
 
@@ -2561,7 +2585,9 @@ const server = http.createServer(async (req, res) => {
             exec("taskset -p -c 0-5 " + child.pid + " 2>/dev/null; renice 15 -p " + child.pid + " 2>/dev/null");
           }
 
+          let activeConvId = conversationId || currentSession.conversationId || currentSession.id || (Date.now().toString());
           activeChildProcess = child;
+          activeProcesses.set(activeConvId, { child, botMessage, activeConvId });
 
           let buffer = "";
           let lastResultStatus = null;
@@ -2592,6 +2618,9 @@ const server = http.createServer(async (req, res) => {
 
                 if (eventObj.event === "init") {
                   if (eventObj.conversation_id) {
+                    activeProcesses.delete(activeConvId);
+                    activeConvId = eventObj.conversation_id;
+                    activeProcesses.set(activeConvId, { child, botMessage, activeConvId });
                     currentSession.conversationId = eventObj.conversation_id;
                     currentSession.id = eventObj.conversation_id;
                     broadcastSSE("init", { conversationId: eventObj.conversation_id });
@@ -2607,7 +2636,7 @@ const server = http.createServer(async (req, res) => {
                     broadcastSSE("chunk", {
                       text_delta: update.text_delta,
                       full_content: botMessage.content,
-                      conversationId: currentSession.conversationId || currentSession.id
+                      conversationId: activeConvId
                     });
                   }
 
@@ -2642,7 +2671,7 @@ const server = http.createServer(async (req, res) => {
 
                     broadcastSSE("tool_update", {
                       tool: toolData,
-                      conversationId: currentSession.conversationId || currentSession.id
+                      conversationId: activeConvId
                     });
                   }
 
@@ -2660,7 +2689,7 @@ const server = http.createServer(async (req, res) => {
                     broadcastSSE("chunk", {
                       text_delta: formatted,
                       full_content: formatted,
-                      conversationId: currentSession.conversationId || currentSession.id
+                      conversationId: activeConvId
                     });
                     broadcastSSE("usage_update", { usage: cachedUsageMetrics });
                   } else if (cmd && (cmd.name === "model" || cmd.name === "models")) {
@@ -2671,7 +2700,7 @@ const server = http.createServer(async (req, res) => {
                     broadcastSSE("chunk", {
                       text_delta: formatted,
                       full_content: formatted,
-                      conversationId: currentSession.conversationId || currentSession.id
+                      conversationId: activeConvId
                     });
                   } else if (cmd && cmd.name === "help" && cmd.data) {
                     const formatted = formatHelpMarkdown(cmd.data);
@@ -2680,7 +2709,7 @@ const server = http.createServer(async (req, res) => {
                     broadcastSSE("chunk", {
                       text_delta: formatted,
                       full_content: formatted,
-                      conversationId: currentSession.conversationId || currentSession.id
+                      conversationId: activeConvId
                     });
                   } else if (cmd && cmd.data) {
                     const formatted = typeof cmd.data === "string" ? cmd.data : "```json\n" + JSON.stringify(cmd.data, null, 2) + "\n```";
@@ -2689,7 +2718,7 @@ const server = http.createServer(async (req, res) => {
                     broadcastSSE("chunk", {
                       text_delta: formatted,
                       full_content: formatted,
-                      conversationId: currentSession.conversationId || currentSession.id
+                      conversationId: activeConvId
                     });
                   }
                 } else if (eventObj.event === "result") {
@@ -2752,19 +2781,19 @@ const server = http.createServer(async (req, res) => {
                 authUrl: detectedUrl,
                 error: "Google oturumu gerekiyor. Lütfen açılan tarayıcıda yetkilendirip kodu kopyalayın.",
                 isWaitingCode: true,
-                conversationId: currentSession.conversationId || currentSession.id
+                conversationId: activeConvId
               });
             }
 
-            broadcastSSE("stderr", { text: stderrText, conversationId: currentSession.conversationId || currentSession.id });
+            broadcastSSE("stderr", { text: stderrText, conversationId: activeConvId });
           });
 
           child.on("error", (err) => {
             if (watchdog) clearInterval(watchdog);
             if (diagRssTimer) clearInterval(diagRssTimer);
             if (authWaitingChildProcess === child) authWaitingChildProcess = null;
-            activeChildProcess = null;
-            const activeConvId = currentSession.conversationId || currentSession.id;
+            if (activeChildProcess === child) activeChildProcess = null;
+            activeProcesses.delete(activeConvId);
             currentSession.isGenerating = false;
             broadcastSSE("generating_done", { conversationId: activeConvId, isGenerating: false });
             try {
@@ -2780,8 +2809,8 @@ const server = http.createServer(async (req, res) => {
             if (watchdog) clearInterval(watchdog);
             if (diagRssTimer) clearInterval(diagRssTimer);
             if (authWaitingChildProcess === child) authWaitingChildProcess = null;
-            activeChildProcess = null;
-            const activeConvId = currentSession.conversationId || currentSession.id;
+            if (activeChildProcess === child) activeChildProcess = null;
+            activeProcesses.delete(activeConvId);
 
             if (child.pid) {
               try {

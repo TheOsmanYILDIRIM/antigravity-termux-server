@@ -1,0 +1,84 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# ==============================================================================
+# Cline Web & REST Bridge - Tmux Launcher & Controller
+# Avenox Doktrini: Düşük Isı & Pil Koruma (nice -n 10, taskset -c 0-5)
+# ==============================================================================
+
+SESSION_NAME="cline-web"
+SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}")"
+DIR="$(dirname "$(dirname "$SCRIPT_PATH")")"
+if [ ! -f "$DIR/cline-server.js" ]; then
+    DIR="$(dirname "$SCRIPT_PATH")"
+fi
+if [ ! -f "$DIR/cline-server.js" ]; then
+    DIR="/data/data/com.termux/files/home/antigravity-termux-server"
+fi
+
+PORT="${PORT:-5115}"
+
+case "$1" in
+  start)
+    if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+      echo "⚡ Cline Server tmux içinde zaten çalışıyor!"
+      echo "📱 Port: http://127.0.0.1:$PORT (veya http://localhost:$PORT)"
+    else
+      echo "🚀 Cline Server verimlilik çekirdekleriyle (taskset -c 0-5 & nice -n 10) başlatılıyor..."
+      tmux new-session -d -s "$SESSION_NAME" -c "$DIR" "nice -n 10 taskset -c 0-5 node cline-server.js"
+      sleep 1
+      if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+        echo "✅ Başlatıldı! (tmux session: $SESSION_NAME)"
+        echo "📱 Port: http://127.0.0.1:$PORT"
+        echo "💡 İpucu: Durumu görmek için: cline-web status"
+      else
+        echo "❌ Başlatılamadı! Lütfen 'node cline-server.js' komutunu deneyin veya 'cline-web attach' ile kontrol edin."
+      fi
+    fi
+    ;;
+
+  stop)
+    if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+      tmux kill-session -t "$SESSION_NAME"
+      echo "🛑 Cline Server durduruldu."
+    else
+      echo "ℹ️ Çalışan bir $SESSION_NAME oturumu bulunamadı."
+    fi
+    ;;
+
+  restart)
+    "$0" stop
+    sleep 1
+    "$0" start
+    ;;
+
+  status)
+    if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+      echo "🟢 Durum: ÇALIŞIYOR (tmux session: $SESSION_NAME)"
+      echo "📱 URL: http://127.0.0.1:$PORT"
+      pid=$(pgrep -f "node cline-server.js" 2>/dev/null | tr '\n' ' ')
+      [ -n "$pid" ] && echo "⚙️ Process PID: $pid"
+    else
+      echo "🔴 Durum: DURDURULDU"
+    fi
+    ;;
+
+  attach)
+    if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+      echo "🔗 Tmux oturumuna bağlanılıyor (Ayrılmak için: Ctrl+B sonra D)..."
+      tmux attach-session -t "$SESSION_NAME"
+    else
+      echo "❌ Çalışan oturum bulunamadı. Önce başlatın: cline-web start"
+    fi
+    ;;
+
+  *)
+    echo "=================================================="
+    echo "⚡ Cline Termux Server Yönetim Komutları:"
+    echo "=================================================="
+    echo "  cline-web start    -> Sunucuyu tmux arka planında başlatır"
+    echo "  cline-web stop     -> Sunucuyu kapatır"
+    echo "  cline-web restart  -> Yeniden başlatır"
+    echo "  cline-web status   -> Çalışma durumunu ve PID gösterir"
+    echo "  cline-web attach   -> Tmux log ekranına canlı bağlanır"
+    echo "=================================================="
+    ;;
+esac
