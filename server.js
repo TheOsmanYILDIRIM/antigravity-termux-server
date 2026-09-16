@@ -268,19 +268,34 @@ async function getBrainConversations(force = false) {
           const content = await fs.promises.readFile(transcriptFile, "utf-8");
           const lines = content.split("\n");
           title = extractSessionTitle(lines);
+          const projectName = extractSessionProject(lines);
           messageCount = Math.max(1, lines.filter(l => l.includes('"USER_INPUT"') || l.includes('"PLANNER_RESPONSE"')).length);
-        } catch (err) {}
-
-        brainConversationsCache.set(convId, {
-          id: convId,
-          title: title,
-          createdAt: createdAt,
-          lastMessageTime: stats.mtime.toISOString(),
-          messageCount: messageCount,
-          mtimeMs: stats.mtimeMs,
-          size: stats.size,
-          isSubagent: subagentConversationIds.has(convId)
-        });
+          brainConversationsCache.set(convId, {
+            id: convId,
+            title: title,
+            projectName: projectName,
+            projectTag: projectName,
+            createdAt: createdAt,
+            lastMessageTime: stats.mtime.toISOString(),
+            messageCount: messageCount,
+            mtimeMs: stats.mtimeMs,
+            size: stats.size,
+            isSubagent: subagentConversationIds.has(convId)
+          });
+        } catch (err) {
+          brainConversationsCache.set(convId, {
+            id: convId,
+            title: title,
+            projectName: null,
+            projectTag: null,
+            createdAt: createdAt,
+            lastMessageTime: stats.mtime.toISOString(),
+            messageCount: messageCount,
+            mtimeMs: stats.mtimeMs,
+            size: stats.size,
+            isSubagent: subagentConversationIds.has(convId)
+          });
+        }
       } catch (err) {}
     }
   } catch (e) {
@@ -307,6 +322,7 @@ async function loadBrainConversation(id) {
     const lines = content.split("\n").filter(l => l.trim().length > 0);
     const messages = [];
     const title = extractSessionTitle(lines);
+    const projectName = extractSessionProject(lines);
 
     for (const line of lines) {
       try {
@@ -342,21 +358,46 @@ async function loadBrainConversation(id) {
               });
             });
           }
-          let turnTok = Math.max(1, Math.round((botContent.length + JSON.stringify(tools).length) / 3.6));
-          messages.push({
-            role: "bot",
-            content: botContent,
-            tools: tools,
-            usage: {
+
+          const lastMsg = messages.length > 0 ? messages[messages.length - 1] : null;
+          if (lastMsg && lastMsg.role === "bot") {
+            // Merge into existing bot turn
+            if (botContent) {
+              if (lastMsg.content) lastMsg.content += "\n\n" + botContent;
+              else lastMsg.content = botContent;
+            }
+            if (tools.length > 0) {
+              if (!Array.isArray(lastMsg.tools)) lastMsg.tools = [];
+              lastMsg.tools.push(...tools);
+            }
+            let totalChars = (lastMsg.content || "").length + JSON.stringify(lastMsg.tools || []).length;
+            let turnTok = Math.max(1, Math.round(totalChars / 3.6));
+            lastMsg.usage = {
               turn_tokens: turnTok,
               context_tokens: turnTok,
               total_tokens: turnTok,
               input_tokens: 0,
-              output_tokens: Math.max(1, Math.round(botContent.length / 3.6))
-            },
-            time: step.created_at || new Date().toISOString(),
-            state: "done"
-          });
+              output_tokens: Math.max(1, Math.round((lastMsg.content || "").length / 3.6))
+            };
+            lastMsg.time = step.created_at || lastMsg.time;
+          } else {
+            // New bot turn
+            let turnTok = Math.max(1, Math.round((botContent.length + JSON.stringify(tools).length) / 3.6));
+            messages.push({
+              role: "bot",
+              content: botContent,
+              tools: tools,
+              usage: {
+                turn_tokens: turnTok,
+                context_tokens: turnTok,
+                total_tokens: turnTok,
+                input_tokens: 0,
+                output_tokens: Math.max(1, Math.round(botContent.length / 3.6))
+              },
+              time: step.created_at || new Date().toISOString(),
+              state: "done"
+            });
+          }
         }
       } catch (e) {}
     }
@@ -381,6 +422,8 @@ async function loadBrainConversation(id) {
       id: id,
       conversationId: id,
       title: title,
+      projectName: projectName,
+      projectTag: projectName,
       messages: messages,
       isGenerating: false,
       createdAt: new Date().toISOString()
@@ -653,6 +696,55 @@ function extractSessionTitle(lines) {
   }
 
   return latestAiTitle || fallbackUserTitle || "Antigravity Sohbeti";
+}
+
+function extractSessionProject(lines) {
+  let explicitProject = null;
+  let detectedProject = null;
+
+  // 1. Search for explicit project tag sentinel in bot responses or user requests
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (!line || !line.trim()) continue;
+    try {
+      const step = JSON.parse(line);
+      const content = step.content || "";
+      const m = content.match(/<!--__AGY_PROJECT_TAG:\s*([^\n\r]+?)\s*__-->/) ||
+                content.match(/<!--__AGY_PROJECT:\s*([^\n\r]+?)\s*__-->/) ||
+                content.match(/<!--PROJECT_TAG:\s*([^\n\r]+?)\s*-->/) ||
+                content.match(/<!--PROJECT:\s*([^\n\r]+?)\s*-->/);
+      if (m && m[1]) {
+        const p = m[1].trim().replace(/^\[|\]$/g, "");
+        if (p && p.length > 1 && p.length < 50 && !isPlaceholderTitle(p)) {
+          explicitProject = p;
+          break;
+        }
+      }
+    } catch (e) {}
+  }
+
+  if (explicitProject) return explicitProject;
+
+  // 2. Scan for tool calls or path mentions pointing to a recognized project
+  try {
+    const homeDir = process.env.HOME || "/data/data/com.termux/files/home";
+    const knownProjects = scanProjectsList(homeDir);
+    const projectNames = (knownProjects || []).map(p => p.name).filter(Boolean);
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (!line || !line.trim()) continue;
+      for (const pName of projectNames) {
+        if (line.includes(`${homeDir}/${pName}`) || line.includes(`/${pName}/`)) {
+          detectedProject = pName;
+          break;
+        }
+      }
+      if (detectedProject) break;
+    }
+  } catch (e) {}
+
+  return detectedProject || null;
 }
 
 function getVaultFiles(dirPath, baseRelative = "", maxDepth = 6) {
@@ -1163,29 +1255,34 @@ async function fetchRealAgyUsage(force = false) {
 
     const agyBin = fs.existsSync("/data/data/com.termux/files/usr/bin/agy") ? "/data/data/com.termux/files/usr/bin/agy" : "agy";
     const child = spawn(agyBin, ["-p", "/usage", "--output-format", "json"], { env });
+    try { child.stdin.end(); } catch (e) {}
 
     let stdout = "";
     const timer = setTimeout(() => {
       try { child.kill("SIGKILL"); } catch (e) {}
       isFetchingUsage = false;
       resolve(cachedUsageMetrics || parseUsageData(null));
-    }, 35000);
+    }, 15000);
 
     child.stdout.on("data", d => { stdout += d.toString(); });
     child.on("close", (code) => {
       clearTimeout(timer);
       isFetchingUsage = false;
       try {
-        if (code === 0 && stdout.trim()) {
-          const json = JSON.parse(stdout.trim());
-          const data = (json.command && json.command.data) || (json.result && json.result.command && json.result.command.data) || null;
-          if (data) {
-            cachedUsageMetrics = parseUsageData(data);
-            lastUsageCalculatedAt = Date.now();
-            broadcastSSE("usage_update", { usage: cachedUsageMetrics });
-            resolve(cachedUsageMetrics);
-            return;
-          }
+        let jsonStr = stdout.trim();
+        const firstBrace = jsonStr.indexOf("{");
+        const lastBrace = jsonStr.lastIndexOf("}");
+        if (firstBrace !== -1 && lastBrace > firstBrace) {
+          jsonStr = jsonStr.substring(firstBrace, lastBrace + 1);
+        }
+        const json = JSON.parse(jsonStr);
+        const data = (json.command && json.command.data) || (json.result && json.result.command && json.result.command.data) || null;
+        if (data) {
+          cachedUsageMetrics = parseUsageData(data);
+          lastUsageCalculatedAt = Date.now();
+          broadcastSSE("usage_update", { usage: cachedUsageMetrics });
+          resolve(cachedUsageMetrics);
+          return;
         }
       } catch (e) {}
       resolve(cachedUsageMetrics || parseUsageData(null));
@@ -2228,7 +2325,7 @@ const server = http.createServer(async (req, res) => {
         if (isMobileClient) {
           clientContextInstruction = `[Ortam Bilgisi & İstemci: Antigravity Android Mobil Uygulaması]
 [Mobil Önizleme ve Formatlama Kuralları:
-1. Dinamik Oturum Başlığı: Yanıtınızın KESİNLİKLE İLK SATIRINA (her şeyden önce), konuyu özetleyen 3-5 kelimelik Türkçe bir başlığı <!--__AGY_SESSION_TITLE: Örnek Konu Başlığı__--> formatında ekleyin. Bu etiket kullanıcı arayüzünde gizlenir ve oturum listesi başlığını dinamik olarak günceller.
+1. Dinamik Oturum Başlığı ve Proje Etiketi: Yanıtınızın KESİNLİKLE İLK SATIRINA (her şeyden önce), konuyu özetleyen 3-5 kelimelik Türkçe bir başlığı <!--__AGY_SESSION_TITLE: Örnek Konu Başlığı__--> formatında ekleyin. Eğer çalışılan/konuşulan konu belirli bir projeye aitse (örneğin antigravity-android, antigravity-termux-server, kpss-2026-lisans vb.), hemen yanına <!--__AGY_PROJECT_TAG: ProjeAdı__--> etiketini de ekleyin (Örnek: <!--__AGY_SESSION_TITLE: Kota Düzeltmesi__--><!--__AGY_PROJECT_TAG: antigravity-android__-->). Bu etiketler kullanıcı arayüzünde gizlenir, oturum listesi başlığını dinamik olarak günceller ve sohbeti projeye göre filtreleyip renklendirir.
 2. Dosya ve Kod Bağlantıları: Referans verilen, düzenlenen veya oluşturulan her dosya/kod için mutlaka [dosya_adi.uzanti](file:///tam/dosya/yolu) formatında tıklanabilir bağlantı verin (örnek: [server.js](file:///data/data/com.termux/files/home/antigravity-termux-server/server.js)). Kullanıcı bağlantıya dokunduğunda mobil uygulamada dahili kod önizleyicisi ve editörü açılır.
 3. Görseller & Şemalar: Oluşturulan, düzenlenen veya analiz edilen görselleri doğrudan ![Görsel Açıklaması](file:///tam/dosya/yolu.png) veya ![Görsel Açıklaması](/tam/dosya/yolu.png) formatında Markdown görsel etiketi olarak verin. Mobil uygulama bunları sohbet içinde interaktif önizleme kartı ve tam ekran yakınlaştırılabilir galeri olarak gösterir.
 4. Uyarı & Vurgu Kutuları: GitHub callout formatını kullanın (> [!NOTE], > [!TIP], > [!IMPORTANT], > [!WARNING], > [!CAUTION]). Mobil uygulama bunları ikonlu ve renkli kutular olarak render eder.
@@ -2634,7 +2731,7 @@ const server = http.createServer(async (req, res) => {
             const isSuccess = lastResultStatus === "SUCCESS";
             const failed = !isSuccess || killedByWatchdog;
 
-            // Extract AI session title if present in botMessage.content
+            // Extract AI session title and project tag if present in botMessage.content
             if (activeConvId && botMessage.content) {
               const m = botMessage.content.match(/<!--__AGY_SESSION_TITLE:\s*([^\n\r]+?)\s*__-->/) ||
                         botMessage.content.match(/<!--SESSION_TITLE:\s*([^\n\r]+?)\s*-->/);
@@ -2647,6 +2744,25 @@ const server = http.createServer(async (req, res) => {
                     cached.title = newTitle;
                     brainConversationsCache.set(activeConvId, cached);
                   }
+                  broadcastSSE("title_updated", { conversationId: activeConvId, title: newTitle });
+                }
+              }
+
+              const pm = botMessage.content.match(/<!--__AGY_PROJECT_TAG:\s*([^\n\r]+?)\s*__-->/) ||
+                         botMessage.content.match(/<!--__AGY_PROJECT:\s*([^\n\r]+?)\s*__-->/) ||
+                         botMessage.content.match(/<!--PROJECT_TAG:\s*([^\n\r]+?)\s*-->/);
+              if (pm && pm[1]) {
+                const newProject = pm[1].trim().replace(/^\[|\]$/g, "");
+                if (newProject && newProject.length > 1 && !isPlaceholderTitle(newProject)) {
+                  currentSession.projectName = newProject;
+                  currentSession.projectTag = newProject;
+                  const cached = brainConversationsCache.get(activeConvId);
+                  if (cached) {
+                    cached.projectName = newProject;
+                    cached.projectTag = newProject;
+                    brainConversationsCache.set(activeConvId, cached);
+                  }
+                  broadcastSSE("project_updated", { conversationId: activeConvId, projectName: newProject, projectTag: newProject });
                 }
               }
             }
