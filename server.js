@@ -26,6 +26,7 @@ const AGENTS_SKILLS_DIR = "/data/data/com.termux/files/home/.agents/skills";
 const BUILTIN_SKILLS_DIR = "/data/data/com.termux/files/home/.gemini/antigravity-cli/builtin/skills";
 const BRAIN_DIR = "/data/data/com.termux/files/home/.gemini/antigravity-cli/brain";
 const MODELS_CACHE_FILE = path.join(DATA_DIR, "models_cache.json");
+const USAGE_CACHE_FILE = path.join(DATA_DIR, "usage_cache.json");
 
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 if (!fs.existsSync(SESSIONS_DIR)) fs.mkdirSync(SESSIONS_DIR, { recursive: true });
@@ -1078,6 +1079,20 @@ function resolveAnyFilePath(rawPath) {
 
 // Usage Metrics (Real AGY CLI Quota & Structured Token Stats)
 let cachedUsageMetrics = null;
+let lastUsageCalculatedAt = 0;
+let isFetchingUsage = false;
+let usageFetchPromise = null;
+
+try {
+  if (fs.existsSync(USAGE_CACHE_FILE)) {
+    const raw = fs.readFileSync(USAGE_CACHE_FILE, "utf-8");
+    const parsed = JSON.parse(raw);
+    if (parsed && (parsed.recent5h || (Array.isArray(parsed.groups) && parsed.groups.length > 0))) {
+      cachedUsageMetrics = parsed;
+      lastUsageCalculatedAt = Date.now();
+    }
+  }
+} catch (e) {}
 function calculateSessionContextTokens(session) {
   if (!session || !Array.isArray(session.messages)) return 0;
   let totalChars = 0;
@@ -1237,12 +1252,19 @@ async function fetchRealAgyUsage(force = false) {
     return cachedUsageMetrics;
   }
 
-  if (isFetchingUsage) {
-    return cachedUsageMetrics || parseUsageData(null);
+  if (usageFetchPromise) {
+    return usageFetchPromise;
   }
 
-  isFetchingUsage = true;
-  return new Promise((resolve) => {
+  usageFetchPromise = new Promise((resolve) => {
+    let resolved = false;
+    const finish = (result) => {
+      if (resolved) return;
+      resolved = true;
+      usageFetchPromise = null;
+      resolve(result);
+    };
+
     const env = {
       ...process.env,
       CODEVIBE_ALLOW_FILE_KEYCHAIN: "1",
@@ -1254,20 +1276,43 @@ async function fetchRealAgyUsage(force = false) {
     };
 
     const agyBin = fs.existsSync("/data/data/com.termux/files/usr/bin/agy") ? "/data/data/com.termux/files/usr/bin/agy" : "agy";
-    const child = spawn(agyBin, ["--dangerously-skip-permissions", "--output-format", "stream-json", "-p", "/usage"], { env });
+    const child = spawn(agyBin, ["--dangerously-skip-permissions", "--output-format", "stream-json", "-p", "/usage"], {
+      cwd: process.env.HOME || "/data/data/com.termux/files/home",
+      env
+    });
     try { child.stdin.end(); } catch (e) {}
 
     let stdout = "";
     const timer = setTimeout(() => {
       try { child.kill("SIGKILL"); } catch (e) {}
-      isFetchingUsage = false;
-      resolve(cachedUsageMetrics || parseUsageData(null));
-    }, 20000);
+      finish(cachedUsageMetrics || parseUsageData(null));
+    }, 45000);
 
-    child.stdout.on("data", d => { stdout += d.toString(); });
+    child.stdout.on("data", d => {
+      stdout += d.toString();
+      // Eager parsing as soon as data arrives
+      const lines = stdout.split("\n");
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) continue;
+        try {
+          const json = JSON.parse(trimmed);
+          const data = (json.command && json.command.data) || (json.result && json.result.command && json.result.command.data) || null;
+          if (data && Array.isArray(data.groups) && data.groups.length > 0) {
+            cachedUsageMetrics = parseUsageData(data);
+            lastUsageCalculatedAt = Date.now();
+            try { fs.writeFileSync(USAGE_CACHE_FILE, JSON.stringify(cachedUsageMetrics, null, 2)); } catch(e) {}
+            broadcastSSE("usage_update", { usage: cachedUsageMetrics });
+            clearTimeout(timer);
+            finish(cachedUsageMetrics);
+            return;
+          }
+        } catch (e) {}
+      }
+    });
+
     child.on("close", (code) => {
       clearTimeout(timer);
-      isFetchingUsage = false;
       try {
         const lines = stdout.split("\n");
         for (const line of lines) {
@@ -1276,25 +1321,27 @@ async function fetchRealAgyUsage(force = false) {
           try {
             const json = JSON.parse(trimmed);
             const data = (json.command && json.command.data) || (json.result && json.result.command && json.result.command.data) || null;
-            if (data && Array.isArray(data.groups)) {
+            if (data && Array.isArray(data.groups) && data.groups.length > 0) {
               cachedUsageMetrics = parseUsageData(data);
               lastUsageCalculatedAt = Date.now();
+              try { fs.writeFileSync(USAGE_CACHE_FILE, JSON.stringify(cachedUsageMetrics, null, 2)); } catch(e) {}
               broadcastSSE("usage_update", { usage: cachedUsageMetrics });
-              resolve(cachedUsageMetrics);
+              finish(cachedUsageMetrics);
               return;
             }
           } catch (e) {}
         }
       } catch (e) {}
-      resolve(cachedUsageMetrics || parseUsageData(null));
+      finish(cachedUsageMetrics || parseUsageData(null));
     });
 
     child.on("error", () => {
       clearTimeout(timer);
-      isFetchingUsage = false;
-      resolve(cachedUsageMetrics || parseUsageData(null));
+      finish(cachedUsageMetrics || parseUsageData(null));
     });
   });
+
+  return usageFetchPromise;
 }
 
 // Initial fetch on boot & periodic background refresh every 5 mins (300,000 ms)
@@ -1577,12 +1624,13 @@ const server = http.createServer(async (req, res) => {
 
   // Model Quota & Usage (Real non-blocking AGY metrics)
   if (pathname === "/api/usage" && req.method === "GET") {
-    const usage = cachedUsageMetrics || parseUsageData(null);
-    if (Date.now() - lastUsageCalculatedAt > 60 * 1000) {
-      fetchRealAgyUsage(true).catch(() => {});
+    const force = parsedUrl.searchParams.get("force") === "true";
+    let usage = cachedUsageMetrics;
+    if (!usage || force || (Date.now() - lastUsageCalculatedAt > 60 * 1000)) {
+      usage = await fetchRealAgyUsage(force);
     }
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ status: "ok", usage }));
+    res.end(JSON.stringify({ status: "ok", usage: usage || cachedUsageMetrics || parseUsageData(null) }));
     return;
   }
 
