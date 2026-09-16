@@ -1254,7 +1254,7 @@ async function fetchRealAgyUsage(force = false) {
     };
 
     const agyBin = fs.existsSync("/data/data/com.termux/files/usr/bin/agy") ? "/data/data/com.termux/files/usr/bin/agy" : "agy";
-    const child = spawn(agyBin, ["-p", "/usage", "--output-format", "json"], { env });
+    const child = spawn(agyBin, ["--dangerously-skip-permissions", "--output-format", "stream-json", "-p", "/usage"], { env });
     try { child.stdin.end(); } catch (e) {}
 
     let stdout = "";
@@ -1262,27 +1262,28 @@ async function fetchRealAgyUsage(force = false) {
       try { child.kill("SIGKILL"); } catch (e) {}
       isFetchingUsage = false;
       resolve(cachedUsageMetrics || parseUsageData(null));
-    }, 15000);
+    }, 20000);
 
     child.stdout.on("data", d => { stdout += d.toString(); });
     child.on("close", (code) => {
       clearTimeout(timer);
       isFetchingUsage = false;
       try {
-        let jsonStr = stdout.trim();
-        const firstBrace = jsonStr.indexOf("{");
-        const lastBrace = jsonStr.lastIndexOf("}");
-        if (firstBrace !== -1 && lastBrace > firstBrace) {
-          jsonStr = jsonStr.substring(firstBrace, lastBrace + 1);
-        }
-        const json = JSON.parse(jsonStr);
-        const data = (json.command && json.command.data) || (json.result && json.result.command && json.result.command.data) || null;
-        if (data) {
-          cachedUsageMetrics = parseUsageData(data);
-          lastUsageCalculatedAt = Date.now();
-          broadcastSSE("usage_update", { usage: cachedUsageMetrics });
-          resolve(cachedUsageMetrics);
-          return;
+        const lines = stdout.split("\n");
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) continue;
+          try {
+            const json = JSON.parse(trimmed);
+            const data = (json.command && json.command.data) || (json.result && json.result.command && json.result.command.data) || null;
+            if (data && Array.isArray(data.groups)) {
+              cachedUsageMetrics = parseUsageData(data);
+              lastUsageCalculatedAt = Date.now();
+              broadcastSSE("usage_update", { usage: cachedUsageMetrics });
+              resolve(cachedUsageMetrics);
+              return;
+            }
+          } catch (e) {}
         }
       } catch (e) {}
       resolve(cachedUsageMetrics || parseUsageData(null));
