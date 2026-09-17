@@ -2875,8 +2875,9 @@ const server = http.createServer(async (req, res) => {
               return;
             }
 
-            const isSuccess = lastResultStatus === "SUCCESS";
-            const failed = !isSuccess || killedByWatchdog;
+            const hasProducedOutput = hasStreamedChunk || (botMessage.content && botMessage.content.trim().length > 0) || (botMessage.tools && botMessage.tools.length > 0);
+            const isSuccess = (lastResultStatus === "SUCCESS") || (code === 0 && hasProducedOutput);
+            const failed = (!isSuccess && code !== 0 && !hasProducedOutput) || killedByWatchdog || (lastResultStatus === "ERROR" && !hasProducedOutput);
 
             // Extract AI session title and project tag if present in botMessage.content
             if (activeConvId && botMessage.content) {
