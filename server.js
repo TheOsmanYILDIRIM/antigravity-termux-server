@@ -2465,6 +2465,8 @@ const server = http.createServer(async (req, res) => {
 9. İnteraktif Çoklu Seçim ve Tikli Liste Kartları: Kullanıcıya kurulacak paketler, MCP sunucuları, düzenlenecek dosyalar veya uygulanacak adımlar gibi çoklu seçenekler sunarken maddeleri standart Markdown checklist formatında (\`- [ ] Seçenek 1\`, \`- [ ] Seçenek 2\`) verin. Mobil uygulama bu listeyi dokunulabilir onay kutuları ve altında "Seçilenleri Gönder" butonu içeren interaktif bir seçim kartı olarak render eder.]\n\n`;
         }
 
+        const fullPromptForAgy = (clientContextInstruction + prompt + attachmentNotice).trim();
+
         const isContinue = continueChat && Boolean(conversationId);
         if (!isContinue) {
           currentSession = {
@@ -2912,7 +2914,11 @@ const server = http.createServer(async (req, res) => {
               let errMsg = lastResultError;
               let isAgentLimit = false;
 
-              if (errMsg && /agent execution terminated due to error/i.test(errMsg)) {
+              if (errMsg && /429|resource_exhausted|rate_limit|rate limit|quota exceeded|too many requests/i.test(errMsg)) {
+                errMsg = "⚠️ Model Hız/Kota Sınırı (HTTP 429 Rate Limit / Quota Exceeded): AI model sağlayıcısının kota sınırına veya istek hız limitine ulaşıldı. Lütfen 1-2 dakika bekleyin veya Ayarlar'dan başka bir modele (örn. gemini-3.7-flash-medium veya gemini-3.7-flash) geçiş yapın.";
+              } else if (errMsg && /503|500|unavailable|service unavailable|temporary failure in name resolution|connection abort|software caused connection abort/i.test(errMsg)) {
+                errMsg = "⚠️ AI Servis/Sunucu Kesintisi (HTTP 500/503 Service Unavailable / Network Error): Google Cloud / AI sağlayıcısı geçici olarak hizmet veremiyor veya ağ kesintisi yaşandı. Lütfen birazdan tekrar deneyin.";
+              } else if (errMsg && /agent execution terminated due to error/i.test(errMsg)) {
                 isAgentLimit = true;
                 if (botMessage.tools && botMessage.tools.length > 0) {
                   errMsg = "Ajan oturum adım/token sınırına ulaştı (Agent limit). Yapılan araç çağrıları ve dosya değişiklikleri başarıyla uygulandı. Sohbet geçmişi çok uzadığı için yeni bir sohbet başlatmanız önerilir.";
