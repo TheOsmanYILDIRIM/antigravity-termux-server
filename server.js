@@ -1993,6 +1993,50 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Download Raw Binary / Text File Stream
+  if ((pathname === "/api/fs/raw" || pathname === "/api/fs/download") && (req.method === "GET" || req.method === "HEAD")) {
+    const rawPath = parsedUrl.searchParams.get("path");
+    if (!rawPath) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "path parametresi zorunludur." }));
+      return;
+    }
+
+    const resolved = resolveAnyFilePath(rawPath);
+    if (!resolved || !fs.existsSync(resolved)) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Dosya bulunamadı: " + rawPath }));
+      return;
+    }
+
+    try {
+      const stat = fs.statSync(resolved);
+      if (stat.isDirectory()) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Belirtilen yol bir dizindir." }));
+        return;
+      }
+
+      const fileName = path.basename(resolved);
+      const mime = getMimeType(resolved) || "application/octet-stream";
+
+      res.writeHead(200, {
+        "Content-Type": mime,
+        "Content-Length": stat.size,
+        "Content-Disposition": `attachment; filename="${encodeURIComponent(fileName)}"`
+      });
+
+      const stream = fs.createReadStream(resolved);
+      stream.pipe(res);
+    } catch (e) {
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    }
+    return;
+  }
+
   // Save / Edit File Content
   if (pathname === "/api/fs/save" && req.method === "POST") {
     let body = "";
