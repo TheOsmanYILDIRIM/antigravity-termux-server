@@ -2367,9 +2367,11 @@ const server = http.createServer(async (req, res) => {
         const continueChat = !isExplicitNew && reqConvId.length > 0;
         const targetConvId = continueChat ? reqConvId : "";
 
+        const conversationId = targetConvId;
+
         // Check if user entered /compact slash command
         if (prompt === "/compact" || prompt.startsWith("/compact ")) {
-          const convId = targetConvId || currentSession.conversationId || currentSession.id;
+          const convId = conversationId || currentSession.conversationId || currentSession.id;
           const compactRes = compactConversationTranscript(convId, 0, true);
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ status: "ok", message: "Bağlam sıkıştırıldı.", ...compactRes }));
@@ -2377,9 +2379,9 @@ const server = http.createServer(async (req, res) => {
         }
 
         // Auto-Compact Check: If conversation exceeds threshold, compact before running agy
-        if (continueChat && targetConvId && data.autoCompact !== false) {
+        if (continueChat && conversationId && data.autoCompact !== false) {
           const threshold = parseInt(data.compactThresholdTokens || 80000, 10);
-          compactConversationTranscript(targetConvId, threshold, false);
+          compactConversationTranscript(conversationId, threshold, false);
         }
 
         if (!continueChat) {
@@ -2392,8 +2394,8 @@ const server = http.createServer(async (req, res) => {
             createdAt: new Date().toISOString()
           };
         } else {
-          currentSession.conversationId = targetConvId;
-          currentSession.id = targetConvId;
+          currentSession.conversationId = conversationId;
+          currentSession.id = conversationId;
         }
         const model = (data.model || "").trim();
         const effort = (data.effort || "").trim();
@@ -2407,9 +2409,9 @@ const server = http.createServer(async (req, res) => {
           return;
         }
 
-        if (currentSession.isGenerating) {
+        if (conversationId && activeProcesses.has(conversationId)) {
           res.writeHead(429, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "Asistan şu anda başka bir yanıt üretiyor. Lütfen bekleyin." }));
+          res.end(JSON.stringify({ error: "Bu sohbet için şu anda başka bir yanıt üretiliyor. Lütfen bekleyin." }));
           return;
         }
 
@@ -2505,8 +2507,10 @@ const server = http.createServer(async (req, res) => {
           isGenerating: true
         });
 
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ status: "accepted", prompt }));
+        if (!res.headersSent) {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ status: "accepted", prompt }));
+        }
 
         async function startChatProcess(attempt = 1) {
           if (manualStop) return;
@@ -2965,8 +2969,10 @@ const server = http.createServer(async (req, res) => {
         startChatProcess(1);
 
       } catch (err) {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Geçersiz istek: " + err.message }));
+        if (!res.headersSent) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Geçersiz istek: " + err.message }));
+        }
       }
     });
     return;
