@@ -2465,9 +2465,16 @@ const server = http.createServer(async (req, res) => {
 9. İnteraktif Çoklu Seçim ve Tikli Liste Kartları: Kullanıcıya kurulacak paketler, MCP sunucuları, düzenlenecek dosyalar veya uygulanacak adımlar gibi çoklu seçenekler sunarken maddeleri standart Markdown checklist formatında (\`- [ ] Seçenek 1\`, \`- [ ] Seçenek 2\`) verin. Mobil uygulama bu listeyi dokunulabilir onay kutuları ve altında "Seçilenleri Gönder" butonu içeren interaktif bir seçim kartı olarak render eder.]\n\n`;
         }
 
-        const fullPromptForAgy = (clientContextInstruction + prompt + attachmentNotice).trim();
-
-        if (currentSession.messages.length === 0) {
+        const isContinue = continueChat && Boolean(conversationId);
+        if (!isContinue) {
+          currentSession = {
+            id: null,
+            conversationId: null,
+            title: prompt.length > 35 ? prompt.slice(0, 35) + "…" : (prompt || "Yeni Sohbet"),
+            messages: [],
+            isGenerating: true
+          };
+        } else if (currentSession.messages.length === 0) {
           currentSession.title = prompt.length > 35 ? prompt.slice(0, 35) + "…" : (prompt || "Ekli Dosya Analizi");
         }
 
@@ -2490,9 +2497,9 @@ const server = http.createServer(async (req, res) => {
         currentSession.isGenerating = true;
         manualStop = false;
 
-        const currentActiveConvId = currentSession.conversationId || currentSession.id;
+        let activeConvId = (isContinue ? conversationId : null) || currentSession.conversationId || currentSession.id || (Date.now().toString());
         broadcastSSE("generating_start", {
-          conversationId: currentActiveConvId,
+          conversationId: activeConvId,
           isGenerating: true
         });
 
@@ -2518,8 +2525,8 @@ const server = http.createServer(async (req, res) => {
             "--print-timeout", "60m"
           ];
 
-          if (continueChat && currentSession.conversationId) {
-            args.push("--conversation", currentSession.conversationId);
+          if (isContinue && (conversationId || currentSession.conversationId)) {
+            args.push("--conversation", conversationId || currentSession.conversationId);
           }
 
           if (model && model !== "default") {
