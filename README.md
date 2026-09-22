@@ -179,5 +179,27 @@ Bu proje MIT lisansı ile korunmaktadır.
 Terminal actions are served dynamically by `/api/actions`. To choose which
 known actions are exposed, copy `actions.json.example` to
 `~/.config/terminal-hub/actions.json` and edit only its `enabled` ID list.
-Executable paths and arguments remain server-owned; unknown IDs are ignored.
-Without a manifest, the built-in action registry is used.
+Executable paths and arguments are read from the local manifest; unknown IDs
+are ignored. Existing built-ins remain available as a fallback, while custom
+actions can be added or removed by editing the manifest only.
+
+An action entry has this shape:
+
+```json
+{
+  "id": "my-action",
+  "label": "Uzun başlık",
+  "compactLabel": "Kısa başlık",
+  "category": "Kategori",
+  "icon": "terminal",
+  "order": 10,
+  "executable": "/absolute/path/to/program",
+  "args": ["--flag"]
+}
+```
+
+Built-in actions include the read-only `agy-auth` account/status/quota/history
+commands, the `ls` and `usage` aliases, and the download-triage actions
+`dl-clean`, `dl-organize`, `dl-list`, and `dl-rollback`. Interactive or
+argument-dependent account mutations (login, add, switch, remove, import,
+export) remain CLI-only.

@@ -16,14 +16,49 @@ const BUILTIN_ACTIONS = Object.freeze({
   "opencode-start": { id: "opencode-start", label: "OpenCode servisini başlat", executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/antigravity-termux-server/bin/opencode-web", "start"] },
   "opencode-stop": { id: "opencode-stop", label: "OpenCode servisini durdur", executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/antigravity-termux-server/bin/opencode-web", "stop"] },
   "cline-start": { id: "cline-start", label: "Cline servisini başlat", executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/antigravity-termux-server/bin/cline-web", "start"] },
-  "cline-stop": { id: "cline-stop", label: "Cline servisini durdur", executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/antigravity-termux-server/bin/cline-web", "stop"] }
+  "cline-stop": { id: "cline-stop", label: "Cline servisini durdur", executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/antigravity-termux-server/bin/cline-web", "stop"] },
+  "agy-auth-list": { id: "agy-auth-list", label: "AGY hesaplarını listele", executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["list"] },
+  "agy-auth-ls": { id: "agy-auth-ls", label: "AGY hesaplarını listele (ls)", executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["ls"] },
+  "agy-auth-current": { id: "agy-auth-current", label: "Aktif AGY hesabını göster", executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["current"] },
+  "agy-auth-status": { id: "agy-auth-status", label: "AGY auth durumunu göster", executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["status"] },
+  "agy-auth-quota": { id: "agy-auth-quota", label: "AGY kotasını göster", executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["quota"] },
+  "agy-auth-usage": { id: "agy-auth-usage", label: "AGY kotasını göster (usage)", executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["usage"] },
+  "agy-auth-history": { id: "agy-auth-history", label: "AGY kota geçmişini göster", executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["history"] },
+  "agy-auth-sync": { id: "agy-auth-sync", label: "AGY kotalarını senkronize et", executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["sync"] },
+  "agy-auth-doctor": { id: "agy-auth-doctor", label: "AGY auth sağlık kontrolü", executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["doctor"] },
+  "agy-auth-ps": { id: "agy-auth-ps", label: "AGY süreçlerini listele", executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["ps"] },
+  "agy-auth-refresh": { id: "agy-auth-refresh", label: "AGY tokenlarını yenile", executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["refresh"] },
+  "agy-auth-auto-dry-run": { id: "agy-auth-auto-dry-run", label: "AGY otomatik geçişini simüle et", executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["auto", "--dry-run"] },
+  "dl-clean": { id: "dl-clean", label: "İndirilenleri düzenle", executable: "/data/data/com.termux/files/usr/bin/dl-organize", args: [] },
+  "dl-organize": { id: "dl-organize", label: "İndirilenleri düzenle (organize)", executable: "/data/data/com.termux/files/usr/bin/dl-organize", args: [] },
+  "dl-list": { id: "dl-list", label: "İndirme geri alma listesini göster", executable: "/data/data/com.termux/files/usr/bin/python3", args: ["/data/data/com.termux/files/home/projects/download-triage/rollback.py", "--list"] },
+  "dl-rollback": { id: "dl-rollback", label: "İndirmeleri geri al", executable: "/data/data/com.termux/files/usr/bin/python3", args: ["/data/data/com.termux/files/home/projects/download-triage/rollback.py"] }
 });
 const ACTIONS_MANIFEST = "/data/data/com.termux/files/home/.config/terminal-hub/actions.json";
 const SCHEDULES_REGISTRY = "/data/data/com.termux/files/home/.config/terminal-hub/schedules.json";
+function normalizeAction(raw) {
+  if (!raw || typeof raw !== "object" || typeof raw.id !== "string" || !/^[A-Za-z0-9._:-]{1,96}$/.test(raw.id)) return null;
+  if (typeof raw.label !== "string" || typeof raw.executable !== "string" || !path.isAbsolute(raw.executable)) return null;
+  if (!Array.isArray(raw.args) || raw.args.some(arg => typeof arg !== "string")) return null;
+  return {
+    ...raw,
+    args: [...raw.args],
+    category: typeof raw.category === "string" && raw.category.trim() ? raw.category.trim() : "Diğer",
+    compactLabel: typeof raw.compactLabel === "string" && raw.compactLabel.trim() ? raw.compactLabel.trim() : raw.label,
+    icon: typeof raw.icon === "string" ? raw.icon : "terminal",
+    order: Number.isFinite(raw.order) ? raw.order : 0
+  };
+}
 function getActions() {
   if (!fs.existsSync(ACTIONS_MANIFEST)) return BUILTIN_ACTIONS;
   try {
     const manifest = JSON.parse(fs.readFileSync(ACTIONS_MANIFEST, "utf8"));
+    if (Array.isArray(manifest.actions)) {
+      const enabled = Array.isArray(manifest.enabled) ? new Set(manifest.enabled.filter(id => typeof id === "string")) : null;
+      const configured = manifest.actions.map(normalizeAction).filter(Boolean);
+      const entries = configured.filter(action => !enabled || enabled.has(action.id));
+      return Object.fromEntries(entries.map(action => [action.id, action]));
+    }
     if (!Array.isArray(manifest.enabled)) return BUILTIN_ACTIONS;
     const enabled = new Set(manifest.enabled.filter(id => typeof id === "string"));
     return Object.fromEntries(Object.entries(BUILTIN_ACTIONS).filter(([id]) => enabled.has(id)));
@@ -63,12 +98,8 @@ function getManagedTasks() {
 }
 
 function manifestForReload() {
-  if (!fs.existsSync(ACTIONS_MANIFEST)) return { enabled: [], actionCount: 0 };
-  const manifest = JSON.parse(fs.readFileSync(ACTIONS_MANIFEST, "utf8"));
-  if (!manifest || !Array.isArray(manifest.enabled) || manifest.enabled.some(id => typeof id !== "string" || !BUILTIN_ACTIONS[id])) {
-    throw new Error("Manifest enabled listesi yalnızca bilinen action id'leri içermelidir.");
-  }
-  return { enabled: [...new Set(manifest.enabled)], actionCount: new Set(manifest.enabled).size };
+  const actions = getActions();
+  return { enabled: Object.keys(actions), actionCount: Object.keys(actions).length };
 }
 function readSchedules() {
   try {
@@ -1923,7 +1954,7 @@ const server = http.createServer(async (req, res) => {
   if (pathname === "/api/actions" && req.method === "GET") {
     const actions = getActions();
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify({ status: "ok", actions: Object.values(actions).map(({ id, label }) => ({ id, label })) }));
+    res.end(JSON.stringify({ status: "ok", actions: Object.values(actions).map(({ id, label, compactLabel, category, icon, order }) => ({ id, label, compactLabel, category, icon, order })) }));
     return;
   }
 

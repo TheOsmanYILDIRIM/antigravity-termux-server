@@ -8,6 +8,23 @@
     "opencode-start",
     "opencode-stop",
     "cline-start",
-    "cline-stop"
+    "cline-stop",
+    "agy-auth-list",
+    "agy-auth-ls",
+    "agy-auth-current",
+    "agy-auth-status",
+    "agy-auth-quota",
+    "agy-auth-usage",
+    "agy-auth-history",
+    "agy-auth-sync",
+    "agy-auth-doctor",
+    "agy-auth-ps",
+    "agy-auth-refresh",
+    "agy-auth-auto-dry-run",
+    "dl-clean",
+    "dl-organize",
+    "dl-list",
+    "dl-rollback",
+    "custom-example"
   ]
 }
