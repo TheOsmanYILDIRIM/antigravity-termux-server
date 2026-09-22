@@ -5,6 +5,16 @@ const fs = require("fs");
 const path = require("path");
 const { spawn, exec } = require("child_process");
 
+// Deliberately closed action registry: clients may select an id only.  They can
+// never provide an executable, cwd, or arguments.
+const ACTIONS = Object.freeze({
+  "agy-start": { id: "agy-start", label: "AGY başlat", executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/.termux/tasker/agy-web-start.sh"] },
+  "agy-stop": { id: "agy-stop", label: "AGY durdur", executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/.termux/tasker/agy-web-stop.sh"] },
+  "vault-sync": { id: "vault-sync", label: "Vault senkronize et", executable: "/data/data/com.termux/files/usr/bin/python3", args: ["/data/data/com.termux/files/home/vault/beyin.py", "sync"] }
+});
+const ACTION_TIMEOUT_MS = 120000;
+const runningActions = new Map();
+
 process.on("uncaughtException", (err) => {
   console.error("[CRITICAL - UNCAUGHT EXCEPTION]", err);
   try {
@@ -1420,6 +1430,35 @@ const server = http.createServer(async (req, res) => {
 
   const parsedUrl = new URL(req.url, "http://" + (req.headers.host || "localhost"));
   const pathname = parsedUrl.pathname;
+
+  if (pathname === "/api/actions" && req.method === "GET") {
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ status: "ok", actions: Object.values(ACTIONS).map(({ id, label }) => ({ id, label })) }));
+    return;
+  }
+
+  if (pathname === "/api/actions/run" && req.method === "POST") {
+    let body = "";
+    req.on("data", chunk => { body += chunk; if (body.length > 8192) req.destroy(); });
+    req.on("end", () => {
+      let input;
+      try { input = JSON.parse(body || "{}"); } catch (e) { res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Geçersiz JSON" })); return; }
+      const action = typeof input.id === "string" ? ACTIONS[input.id] : null;
+      if (!action) { res.writeHead(404, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Bilinmeyen action" })); return; }
+      if (runningActions.size > 0) { res.writeHead(409, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Başka bir action çalışıyor" })); return; }
+      const actionId = crypto.randomUUID();
+      const child = spawn(action.executable, action.args, { cwd: "/data/data/com.termux/files/home", env: { ...process.env, HOME: "/data/data/com.termux/files/home" }, shell: false });
+      runningActions.set(actionId, child);
+      const emitLines = (stream, channel) => stream.on("data", chunk => String(chunk).split(/\r?\n/).filter(Boolean).forEach(line => broadcastSSE("action_output", { actionId, id: action.id, stream: channel, line })));
+      emitLines(child.stdout, "stdout"); emitLines(child.stderr, "stderr");
+      const timeout = setTimeout(() => { if (runningActions.has(actionId)) child.kill("SIGTERM"); }, ACTION_TIMEOUT_MS);
+      broadcastSSE("action_started", { actionId, id: action.id, pid: child.pid });
+      child.on("error", err => broadcastSSE("action_output", { actionId, id: action.id, stream: "stderr", line: err.message }));
+      child.on("close", exitCode => { clearTimeout(timeout); runningActions.delete(actionId); broadcastSSE("action_finished", { actionId, id: action.id, exitCode }); });
+      res.writeHead(202, { "Content-Type": "application/json" }); res.end(JSON.stringify({ status: "started", actionId, id: action.id, pid: child.pid }));
+    });
+    return;
+  }
 
   // SSE Stream
   if (pathname === "/api/events" && req.method === "GET") {
