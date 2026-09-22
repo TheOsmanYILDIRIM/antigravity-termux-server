@@ -3,7 +3,7 @@ const https = require("https");
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
-const { spawn, exec } = require("child_process");
+const { spawn, exec, execSync } = require("child_process");
 
 // Deliberately closed action registry: clients may select an id only.  They can
 // never provide an executable, cwd, or arguments.
@@ -19,6 +19,7 @@ const BUILTIN_ACTIONS = Object.freeze({
   "cline-stop": { id: "cline-stop", label: "Cline servisini durdur", executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/antigravity-termux-server/bin/cline-web", "stop"] }
 });
 const ACTIONS_MANIFEST = "/data/data/com.termux/files/home/.config/terminal-hub/actions.json";
+const SCHEDULES_REGISTRY = "/data/data/com.termux/files/home/.config/terminal-hub/schedules.json";
 function getActions() {
   if (!fs.existsSync(ACTIONS_MANIFEST)) return BUILTIN_ACTIONS;
   try {
@@ -30,6 +31,57 @@ function getActions() {
     console.error("[ACTIONS] Invalid manifest; using built-in registry:", err.message);
     return BUILTIN_ACTIONS;
   }
+}
+
+const MANAGED_PROCESS_NAMES = new Set(["agy-web", "codex-web", "opencode-web", "cline-web"]);
+function managedProcessName(command) {
+  const tokens = command.trim().split(/\s+/).map(token => path.basename(token));
+  const direct = tokens.find(token => MANAGED_PROCESS_NAMES.has(token));
+  if (direct) return direct;
+  if (/(?:^|[\\/])server\.js(?:\s|$)/.test(command)) return "agy-web";
+  if (/(?:^|\s)codex(?:\s|$)|codex-app-server/.test(command)) return "codex-web";
+  if (/(?:^|\s)opencode(?:\s+serve|\s|$)/.test(command)) return "opencode-web";
+  if (/(?:^|[\\/])cline-server\.js(?:\s|$)/.test(command)) return "cline-web";
+  return null;
+}
+function getManagedTasks() {
+  try {
+    const output = execSync("ps -eo pid=,pcpu=,rss=,etime=,args=", { encoding: "utf8", timeout: 3000 });
+    return output.split(/\r?\n/).filter(Boolean).flatMap(line => {
+      const match = line.trim().match(/^(\d+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(.+)$/);
+      if (!match) return [];
+      const [, pid, cpu, rss, elapsed, command] = match;
+      const name = managedProcessName(command);
+      if (!MANAGED_PROCESS_NAMES.has(name)) return [];
+      const rssKb = Number(rss);
+      return [{ id: `${name}:${pid}`, name, pid: Number(pid), cpuPercent: Number.isFinite(Number(cpu)) ? Number(cpu) : null,
+        rssBytes: Number.isFinite(rssKb) ? rssKb * 1024 : null, elapsed, status: "running" }];
+    });
+  } catch (err) {
+    return [];
+  }
+}
+
+function manifestForReload() {
+  if (!fs.existsSync(ACTIONS_MANIFEST)) return { enabled: [], actionCount: 0 };
+  const manifest = JSON.parse(fs.readFileSync(ACTIONS_MANIFEST, "utf8"));
+  if (!manifest || !Array.isArray(manifest.enabled) || manifest.enabled.some(id => typeof id !== "string" || !BUILTIN_ACTIONS[id])) {
+    throw new Error("Manifest enabled listesi yalnızca bilinen action id'leri içermelidir.");
+  }
+  return { enabled: [...new Set(manifest.enabled)], actionCount: new Set(manifest.enabled).size };
+}
+function readSchedules() {
+  try {
+    if (!fs.existsSync(SCHEDULES_REGISTRY)) return [];
+    const value = JSON.parse(fs.readFileSync(SCHEDULES_REGISTRY, "utf8"));
+    return Array.isArray(value) ? value : [];
+  } catch (err) {
+    return [];
+  }
+}
+function writeSchedules(schedules) {
+  fs.mkdirSync(path.dirname(SCHEDULES_REGISTRY), { recursive: true });
+  fs.writeFileSync(SCHEDULES_REGISTRY, JSON.stringify(schedules, null, 2) + "\n", { mode: 0o600 });
 }
 const ACTION_TIMEOUT_MS = 120000;
 const runningActions = new Map();
@@ -86,19 +138,29 @@ if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 if (!fs.existsSync(VAULT_DIR)) fs.mkdirSync(VAULT_DIR, { recursive: true });
 
 const activeProcesses = new Map();
+const persistentWorkers = new Map();
 let activeChildProcess = null;
 let authWaitingChildProcess = null;
 let pendingPkce = null;
 let manualStop = false;
 let sseClients = [];
 
-// SSE Keep-Alive Ping Interval (Every 15s to keep mobile OkHttp connection alive)
+// SSE Keep-Alive Ping & Heartbeat Interval (Every 10s to keep mobile OkHttp connection alive)
 setInterval(() => {
   if (sseClients.length === 0) return;
   const dead = [];
+  const now = Date.now();
+  const pingChunk = ": ping\n\n";
+  const heartbeatChunk = "event: heartbeat\ndata: " + JSON.stringify({
+    time: now,
+    activeCount: activeProcesses.size,
+    isGenerating: currentSession.isGenerating
+  }) + "\n\n";
+
   sseClients.forEach(client => {
     try {
-      client.res.write(": ping\n\n");
+      client.res.write(pingChunk);
+      client.res.write(heartbeatChunk);
     } catch (e) {
       dead.push(client.id);
     }
@@ -106,7 +168,7 @@ setInterval(() => {
   if (dead.length > 0) {
     sseClients = sseClients.filter(c => !dead.includes(c.id));
   }
-}, 15000);
+}, 10000);
 
 const OAUTH_CLIENT_ID = process.env.OAUTH_CLIENT_ID || ("1071006060591-tmhssin2h21lcre" + "235vtolojh4g403ep." + "apps.googleusercontent.com");
 const OAUTH_CLIENT_SECRET = process.env.OAUTH_CLIENT_SECRET || ["GOCSPX", "-K58FWR486", "LdLJ1mLB8sXC4z6qDAf"].join("");
@@ -176,7 +238,7 @@ async function checkAndRefreshToken(force = false) {
           `[${new Date().toISOString()}] [AUTH] Proactive auto-refresh succeeded, new expiry=${newExpiry}\n`);
       } catch (e) {}
       return true;
-    } else {
+    } else if (hasFile(".git")) {
       try {
         fs.appendFileSync("/data/data/com.termux/files/home/agy_diag.log",
           `[${new Date().toISOString()}] [AUTH] Proactive auto-refresh failed: status=${result.status} err=${JSON.stringify(result.body || result.error)}\n`);
@@ -186,6 +248,45 @@ async function checkAndRefreshToken(force = false) {
   } catch (err) {
     return false;
   }
+}
+
+function checkAndAutoSwitchAccount() {
+  try {
+    const agyAuthBin = "/data/data/com.termux/files/usr/bin/agy-auth";
+    if (!fs.existsSync(agyAuthBin)) return null;
+    const { execSync } = require("child_process");
+    const out = execSync("nice -n 15 taskset -c 0-5 " + agyAuthBin + " auto --json 2>/dev/null", {
+      encoding: "utf-8",
+      timeout: 6000,
+      env: { ...process.env, HOME: "/data/data/com.termux/files/home" }
+    });
+    const parsed = JSON.parse(out);
+    if (parsed && parsed.action === "switch" && parsed.applied) {
+      let fromEmail = parsed.from_email || parsed.from || parsed.active || "önceki";
+      let toEmail = parsed.to_email || parsed.target || "yeni";
+      try {
+        const metaPath = "/data/data/com.termux/files/home/.local/share/agy-auth/meta.json";
+        if (fs.existsSync(metaPath)) {
+          const metaObj = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
+          const accs = (metaObj && metaObj.accounts) || {};
+          if (accs[parsed.active] && accs[parsed.active].email) fromEmail = accs[parsed.active].email;
+          if (accs[parsed.target] && accs[parsed.target].email) toEmail = accs[parsed.target].email;
+        }
+      } catch (e) {}
+      const reason = parsed.reason || "Kota eşik altına indi";
+      try {
+        fs.appendFileSync("/data/data/com.termux/files/home/agy_diag.log",
+          `[${new Date().toISOString()}] [AUTH] Auto-switched account from=${fromEmail} to=${toEmail} reason=${reason}\n`);
+      } catch (e) {}
+      return { switched: true, from: parsed.active, to: parsed.target, fromEmail, toEmail, reason };
+    }
+  } catch (e) {
+    try {
+      fs.appendFileSync("/data/data/com.termux/files/home/agy_diag.log",
+        `[${new Date().toISOString()}] [AUTH] checkAndAutoSwitchAccount error: ${e.message}\n`);
+    } catch (err) {}
+  }
+  return null;
 }
 
 checkAndRefreshToken().catch(() => {});
@@ -268,39 +369,161 @@ setInterval(() => {
   refreshAgyModels();
 }, 15 * 60 * 1000);
 
-// Brain Conversations Reader (Non-blocking async header scanner + Memory Cache)
+// Brain Conversations Reader (High-Performance Disk + Memory Cache + Incremental Background Sync)
 const brainConversationsCache = new Map();
 let isScanningConversations = false;
 
 const subagentConversationIds = new Set();
+const subagentToParentMap = new Map();
+const parentToSubagentsMap = new Map();
 
-async function getBrainConversations(force = false) {
-  if (!fs.existsSync(BRAIN_DIR)) return [];
-  if (isScanningConversations && brainConversationsCache.size > 0 && !force) {
-    return Array.from(brainConversationsCache.values()).sort((a, b) => new Date(b.lastMessageTime) - new Date(a.lastMessageTime));
+function loadBrainCache() {
+  try {
+    if (fs.existsSync(BRAIN_CACHE_FILE)) {
+      const raw = fs.readFileSync(BRAIN_CACHE_FILE, "utf-8");
+      const data = JSON.parse(raw);
+      if (Array.isArray(data.conversations)) {
+        for (const item of data.conversations) {
+          if (item && item.id) brainConversationsCache.set(item.id, item);
+        }
+      }
+      if (Array.isArray(data.subagentIds)) {
+        for (const id of data.subagentIds) subagentConversationIds.add(id);
+      }
+      if (data.subagentToParent && typeof data.subagentToParent === "object") {
+        for (const [k, v] of Object.entries(data.subagentToParent)) {
+          subagentToParentMap.set(k, v);
+        }
+      }
+      if (data.parentToSubagents && typeof data.parentToSubagents === "object") {
+        for (const [k, list] of Object.entries(data.parentToSubagents)) {
+          parentToSubagentsMap.set(k, new Set(list));
+        }
+      }
+    }
+  } catch (e) {
+    console.error("Error loading brain cache from disk:", e.message);
   }
+}
 
+// Initial sync load for zero-latency startup
+loadBrainCache();
+
+let saveCacheTimeout = null;
+function queueSaveBrainCache() {
+  if (saveCacheTimeout) return;
+  saveCacheTimeout = setTimeout(() => {
+    saveCacheTimeout = null;
+    try {
+      const parentToSubObj = {};
+      for (const [k, s] of parentToSubagentsMap.entries()) {
+        parentToSubObj[k] = Array.from(s);
+      }
+      const subToParentObj = {};
+      for (const [k, v] of subagentToParentMap.entries()) {
+        subToParentObj[k] = v;
+      }
+      const payload = {
+        conversations: Array.from(brainConversationsCache.values()),
+        subagentIds: Array.from(subagentConversationIds),
+        subagentToParent: subToParentObj,
+        parentToSubagents: parentToSubObj,
+        updatedAt: new Date().toISOString()
+      };
+      fs.writeFileSync(BRAIN_CACHE_FILE, JSON.stringify(payload));
+    } catch (e) {
+      console.error("Error saving brain cache to disk:", e.message);
+    }
+  }, 1000);
+}
+
+async function getSubagentsForConversation(parentId) {
+  const result = [];
+  const subagentIds = parentToSubagentsMap.get(parentId);
+  if (subagentIds && subagentIds.size > 0) {
+    for (const subId of subagentIds) {
+      const subTranscript = path.join(BRAIN_DIR, subId, ".system_generated/logs/transcript.jsonl");
+      let role = "Subagent";
+      let status = "completed";
+      let lastActivity = null;
+      let stepCount = 0;
+      if (fs.existsSync(subTranscript)) {
+        try {
+          const stat = await fs.promises.stat(subTranscript);
+          lastActivity = stat.mtime.toISOString();
+          const content = await fs.promises.readFile(subTranscript, "utf-8");
+          const lines = content.split("\n").filter(l => l.trim().length > 0);
+          stepCount = lines.length;
+          for (const l of lines) {
+            if (l.includes('"role"') || l.includes('"Role"')) {
+              const rMatch = l.match(/"[rR]ole":\s*"([^"]+)"/);
+              if (rMatch) {
+                role = rMatch[1];
+                break;
+              }
+            }
+          }
+        } catch (e) {}
+      }
+      result.push({
+        id: subId,
+        conversationId: subId,
+        role: role,
+        parentConversationId: parentId,
+        stepCount: stepCount,
+        lastActivity: lastActivity,
+        status: status
+      });
+    }
+  }
+  return result;
+}
+
+async function getTasksForConversation(convId) {
+  const result = [];
+  if (!convId) return result;
+  const tasksDir = path.join(BRAIN_DIR, convId, ".system_generated", "tasks");
+  if (!fs.existsSync(tasksDir)) return result;
+
+  try {
+    const files = await fs.promises.readdir(tasksDir);
+    for (const f of files) {
+      if (!f.endsWith(".log")) continue;
+      const taskId = f.replace(".log", "");
+      const fullPath = path.join(tasksDir, f);
+      try {
+        const stats = await fs.promises.stat(fullPath);
+        const content = await fs.promises.readFile(fullPath, "utf-8");
+        const lines = content.split("\n").filter(l => l.trim().length > 0);
+        const tailLines = lines.slice(-30).join("\n");
+        const isRecent = (Date.now() - stats.mtimeMs) < 20000;
+        const status = isRecent && activeProcesses.has(convId) ? "running" : "completed";
+
+        result.push({
+          id: taskId,
+          taskId: `${convId}/${taskId}`,
+          name: taskId,
+          status: status,
+          sizeBytes: stats.size,
+          lastActivity: stats.mtime.toISOString(),
+          tail: tailLines,
+          logPath: fullPath
+        });
+      } catch (e) {}
+    }
+  } catch (e) {}
+
+  return result.sort((a, b) => new Date(b.lastActivity) - new Date(a.lastActivity));
+}
+
+async function scanBrainConversationsIncremental(force = false) {
+  if (!fs.existsSync(BRAIN_DIR) || isScanningConversations) return;
   isScanningConversations = true;
+  let hasChanges = false;
+
   try {
     const entries = await fs.promises.readdir(BRAIN_DIR, { withFileTypes: true });
 
-    // 1. Discover all subagent IDs referenced in any transcript
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      const tFile = path.join(BRAIN_DIR, entry.name, ".system_generated/logs/transcript.jsonl");
-      if (!fs.existsSync(tFile)) continue;
-      try {
-        const txt = await fs.promises.readFile(tFile, "utf-8");
-        const m = txt.matchAll(/conversationId[\\"]*:\s*[\\"]*([0-9a-fA-F\-]{36})/g);
-        for (const match of m) {
-          if (match[1] !== entry.name) {
-            subagentConversationIds.add(match[1]);
-          }
-        }
-      } catch (e) {}
-    }
-
-    // 2. Scan and cache conversation metadata
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       const convId = entry.name;
@@ -309,8 +532,9 @@ async function getBrainConversations(force = false) {
       try {
         const stats = await fs.promises.stat(transcriptFile);
         const cached = brainConversationsCache.get(convId);
+
+        // Fast path: if file unchanged and not forced, skip full read
         if (cached && cached.mtimeMs === stats.mtimeMs && cached.size === stats.size && !force) {
-          cached.isSubagent = subagentConversationIds.has(convId);
           continue;
         }
 
@@ -320,10 +544,30 @@ async function getBrainConversations(force = false) {
 
         try {
           const content = await fs.promises.readFile(transcriptFile, "utf-8");
+          
+          // Discover subagents referenced in this modified/new transcript
+          const m = content.matchAll(/conversationId[\\"]*:\s*[\\"]*([0-9a-fA-F\-]{36})/g);
+          for (const match of m) {
+            if (match[1] !== convId) {
+              const subId = match[1];
+              subagentConversationIds.add(subId);
+              subagentToParentMap.set(subId, convId);
+              if (!parentToSubagentsMap.has(convId)) {
+                parentToSubagentsMap.set(convId, new Set());
+              }
+              parentToSubagentsMap.get(convId).add(subId);
+            }
+          }
+
           const lines = content.split("\n");
           title = extractSessionTitle(lines);
           const projectName = extractSessionProject(lines);
           messageCount = Math.max(1, lines.filter(l => l.includes('"USER_INPUT"') || l.includes('"PLANNER_RESPONSE"')).length);
+
+          const subagentSet = parentToSubagentsMap.get(convId);
+          const subagentsCount = subagentSet ? subagentSet.size : 0;
+          const parentConvId = subagentToParentMap.get(convId) || null;
+
           brainConversationsCache.set(convId, {
             id: convId,
             title: title,
@@ -334,8 +578,11 @@ async function getBrainConversations(force = false) {
             messageCount: messageCount,
             mtimeMs: stats.mtimeMs,
             size: stats.size,
-            isSubagent: subagentConversationIds.has(convId)
+            isSubagent: subagentConversationIds.has(convId),
+            parentConversationId: parentConvId,
+            subagentsCount: subagentsCount
           });
+          hasChanges = true;
         } catch (err) {
           brainConversationsCache.set(convId, {
             id: convId,
@@ -347,24 +594,41 @@ async function getBrainConversations(force = false) {
             messageCount: messageCount,
             mtimeMs: stats.mtimeMs,
             size: stats.size,
-            isSubagent: subagentConversationIds.has(convId)
+            isSubagent: subagentConversationIds.has(convId),
+            parentConversationId: null,
+            subagentsCount: 0
           });
+          hasChanges = true;
         }
       } catch (err) {}
+    }
+
+    if (hasChanges) {
+      queueSaveBrainCache();
     }
   } catch (e) {
     console.error("Error scanning brain conversations:", e.message);
   } finally {
     isScanningConversations = false;
   }
+}
 
+async function getBrainConversations(force = false) {
+  if (brainConversationsCache.size > 0 && !force) {
+    // Return from disk/memory cache instantly (<2ms) and refresh in background
+    scanBrainConversationsIncremental(false).catch(() => {});
+    return Array.from(brainConversationsCache.values()).sort((a, b) => new Date(b.lastMessageTime) - new Date(a.lastMessageTime));
+  }
+
+  await scanBrainConversationsIncremental(force);
   return Array.from(brainConversationsCache.values()).sort((a, b) => new Date(b.lastMessageTime) - new Date(a.lastMessageTime));
 }
 
-// Background scanner every 30 seconds
+// Background incremental scanner every 30 seconds
 setInterval(() => {
-  getBrainConversations().catch(() => {});
+  scanBrainConversationsIncremental().catch(() => {});
 }, 30000);
+
 
 function cleanUserRequestContent(rawText) {
   if (!rawText) return "";
@@ -376,10 +640,11 @@ function cleanUserRequestContent(rawText) {
     text = reqMatch[1].trim();
   }
 
-  // Strip XML blocks
+  // Strip XML blocks and internal server notices
   text = text.replace(/<SYSTEM_MESSAGE>[\s\S]*?<\/SYSTEM_MESSAGE>/g, "")
              .replace(/<ADDITIONAL_METADATA>[\s\S]*?<\/ADDITIONAL_METADATA>/g, "")
              .replace(/<USER_SETTINGS_CHANGE>[\s\S]*?<\/USER_SETTINGS_CHANGE>/g, "")
+             .replace(/\[Notice\]\s*All your subagents and background tasks[\s\S]*?(?=\n\n|$)/gi, "")
              .replace(/<[^>]+>/g, "");
 
   // If prompt starts with [Ortam Bilgisi or [Mobil Önizleme, strip the entire instruction preface
@@ -528,6 +793,9 @@ async function loadBrainConversation(id) {
       }
     }
 
+    const subagents = await getSubagentsForConversation(id);
+    const tasks = await getTasksForConversation(id);
+
     return {
       id: id,
       conversationId: id,
@@ -535,6 +803,8 @@ async function loadBrainConversation(id) {
       projectName: projectName,
       projectTag: projectName,
       messages: messages,
+      subagents: subagents,
+      tasks: tasks,
       isGenerating: false,
       createdAt: new Date().toISOString()
     };
@@ -1004,17 +1274,19 @@ function getMimeType(filePath) {
     case ".ico": return "image/x-icon";
     case ".pdf": return "application/pdf";
     case ".json": return "application/json";
+    case ".html":
+    case ".htm": return "text/html; charset=utf-8";
+    case ".css": return "text/css; charset=utf-8";
+    case ".js":
+    case ".mjs": return "application/javascript; charset=utf-8";
     case ".txt":
     case ".md":
     case ".kt":
     case ".java":
     case ".py":
-    case ".js":
     case ".ts":
     case ".jsx":
     case ".tsx":
-    case ".html":
-    case ".css":
     case ".sh":
     case ".bash":
     case ".c":
@@ -1091,7 +1363,20 @@ function detectProjectInfo(dirPath) {
       isProject = true;
       type = "C/C++";
       desc = "C / C++ Derleme Projesi";
-    } else if (hasFile(".git")) {
+    } else {
+      let hasHtml = false;
+      try {
+        hasHtml = fs.readdirSync(dirPath, { withFileTypes: true })
+          .some(entry => entry.isFile() && /\.html?$/i.test(entry.name));
+      } catch (e) {}
+      if (hasHtml) {
+        isProject = true;
+        type = "Static Web";
+        desc = "Statik HTML Web Projesi";
+      }
+    }
+
+    if (!isProject && hasFile(".git")) {
       isProject = true;
       type = "Git";
       desc = "Sürüm Kontrol Projesi";
@@ -1184,6 +1469,91 @@ function resolveAnyFilePath(rawPath) {
     clean = path.join(process.env.HOME || "/data/data/com.termux/files/home", clean);
   }
   return clean;
+}
+
+function isStaticWebDirectory(dirPath) {
+  try {
+    return fs.statSync(dirPath).isDirectory() && fs.readdirSync(dirPath, { withFileTypes: true })
+      .some(entry => entry.isFile() && /\.html?$/i.test(entry.name));
+  } catch (e) {
+    return false;
+  }
+}
+
+function isPreviewRootAllowed(realPath) {
+  return PREVIEW_ALLOWED_ROOTS.some(allowed => realPath === allowed || realPath.startsWith(allowed + path.sep));
+}
+
+function selectPreviewEntry(root, requestedEntry) {
+  if (requestedEntry) return requestedEntry;
+  try {
+    const htmlFiles = fs.readdirSync(root, { withFileTypes: true })
+      .filter(entry => entry.isFile() && /\.html?$/i.test(entry.name))
+      .map(entry => entry.name)
+      .sort((a, b) => a.localeCompare(b));
+    return htmlFiles.find(name => name.toLowerCase() === "index.html") || htmlFiles[0] || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function resolvePreviewFile(root, relativePath) {
+  let requested;
+  try {
+    requested = decodeURIComponent(relativePath || "index.html");
+  } catch (e) {
+    return null;
+  }
+  if (requested.includes("\0")) return null;
+  const candidate = path.resolve(root, "." + (requested.startsWith("/") ? requested : "/" + requested));
+  if (candidate !== root && !candidate.startsWith(root + path.sep)) return null;
+  let realCandidate;
+  try {
+    realCandidate = fs.realpathSync(candidate);
+    const realRoot = fs.realpathSync(root);
+    if (realCandidate !== realRoot && !realCandidate.startsWith(realRoot + path.sep)) return null;
+    if (!fs.statSync(realCandidate).isFile()) return null;
+  } catch (e) {
+    return null;
+  }
+  return realCandidate;
+}
+
+function sendPreviewError(res, status, message) {
+  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
+  res.end(JSON.stringify({ error: message }));
+}
+
+function isPreviewOrigin(origin) {
+  if (!origin) return false;
+  try {
+    const parsed = new URL(origin);
+    return parsed.protocol === "http:" && Number(parsed.port || 80) === PREVIEW_PORT &&
+      (parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost");
+  } catch (e) {
+    return false;
+  }
+}
+
+function handlePreviewRequest(req, res) {
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    res.writeHead(405, { "Content-Type": "application/json; charset=utf-8", "Allow": "GET, HEAD" });
+    res.end(JSON.stringify({ error: "Method Not Allowed" }));
+    return;
+  }
+  const pathname = new URL(req.url, "http://127.0.0.1").pathname;
+  const match = pathname.match(/^\/preview\/([a-f0-9]{32})(?:\/(.*))?$/i);
+  const root = match ? previewRoots.get(match[1]) : null;
+  const filePath = root ? resolvePreviewFile(root, match[2] || "index.html") : null;
+  if (!filePath) return sendPreviewError(res, 404, "Preview dosyası bulunamadı.");
+  try {
+    const stat = fs.statSync(filePath);
+    res.writeHead(200, { "Content-Type": getMimeType(filePath), "Content-Length": stat.size, "Cache-Control": "no-cache" });
+    if (req.method === "HEAD") res.end();
+    else fs.createReadStream(filePath).pipe(res);
+  } catch (e) {
+    sendPreviewError(res, 404, "Preview dosyası okunamadı.");
+  }
 }
 
 // Usage Metrics (Real AGY CLI Quota & Structured Token Stats)
@@ -1460,6 +1830,14 @@ setInterval(() => {
 }, 5 * 60 * 1000);
 
 const server = http.createServer(async (req, res) => {
+  const parsedUrl = new URL(req.url, "http://" + (req.headers.host || "localhost"));
+  const pathname = parsedUrl.pathname;
+  if (pathname.startsWith("/api") && isPreviewOrigin(req.headers.origin)) {
+    res.writeHead(403, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ error: "Preview origin API erişimine izin verilmez." }));
+    return;
+  }
+
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -1470,12 +1848,82 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  const parsedUrl = new URL(req.url, "http://" + (req.headers.host || "localhost"));
-  const pathname = parsedUrl.pathname;
+  if (pathname === "/api/terminal/tasks" && req.method === "GET") {
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ status: "ok", tasks: getManagedTasks() }));
+    return;
+  }
+
+  if (pathname === "/api/terminal/plugins" && req.method === "GET") {
+    const actions = getActions();
+    const grouped = new Map();
+    for (const { id, label } of Object.values(actions)) {
+      const service = id === "vault-sync" ? "vault" : id.replace(/-(start|stop)$/, "");
+      if (!grouped.has(service)) grouped.set(service, { id: service, name: service, enabled: true, actions: [] });
+      grouped.get(service).actions.push({ id, label });
+    }
+    const plugins = [...grouped.values()];
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ status: "ok", plugins }));
+    return;
+  }
+
+  if (pathname === "/api/terminal/plugins/reload" && req.method === "POST") {
+    try {
+      const manifest = manifestForReload();
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ status: "ok", reloadedAt: new Date().toISOString(), manifest }));
+    } catch (err) {
+      res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ status: "error", error: err.message }));
+    }
+    return;
+  }
+
+  if (pathname === "/api/terminal/schedules" && req.method === "GET") {
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ status: "ok", schedules: readSchedules(), schema: { id: "string", actionId: "known manifest action id", triggerAt: "future Unix timestamp in milliseconds", label: "string?", enabled: "boolean?" } }));
+    return;
+  }
+
+  if (pathname === "/api/terminal/schedules" && req.method === "POST") {
+    let body = "";
+    req.on("data", chunk => { body += chunk; if (body.length > 8192) req.destroy(); });
+    req.on("end", () => {
+      let input;
+      try { input = JSON.parse(body || "{}"); } catch (err) { res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Geçersiz JSON" })); return; }
+      const actionId = input && input.actionId;
+      const triggerAt = input && input.triggerAt;
+      const id = input && input.id;
+      if (typeof id !== "string" || !/^[A-Za-z0-9._:-]{1,96}$/.test(id) || typeof actionId !== "string" || !getActions()[actionId]) {
+        res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "id ve manifestteki bilinen actionId zorunludur." })); return;
+      }
+      if (!Number.isFinite(triggerAt) || triggerAt <= Date.now()) {
+        res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "triggerAt gelecekteki Unix timestamp (ms) olmalıdır." })); return;
+      }
+      const schedules = readSchedules().filter(item => item.id !== id);
+      const schedule = { id, actionId, triggerAt, ...(typeof input.label === "string" ? { label: input.label.slice(0, 200) } : {}), ...(typeof input.enabled === "boolean" ? { enabled: input.enabled } : { enabled: true }) };
+      schedules.push(schedule);
+      writeSchedules(schedules);
+      res.writeHead(201, { "Content-Type": "application/json" }); res.end(JSON.stringify({ status: "ok", schedule }));
+    });
+    return;
+  }
+
+  if (pathname.startsWith("/api/terminal/schedules/") && req.method === "DELETE") {
+    const id = decodeURIComponent(pathname.slice("/api/terminal/schedules/".length));
+    const schedules = readSchedules();
+    const next = schedules.filter(item => item.id !== id);
+    if (next.length === schedules.length) { res.writeHead(404, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Schedule bulunamadı." })); return; }
+    writeSchedules(next);
+    res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ status: "ok", id }));
+    return;
+  }
 
   if (pathname === "/api/actions" && req.method === "GET") {
+    const actions = getActions();
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify({ status: "ok", actions: Object.values(ACTIONS).map(({ id, label }) => ({ id, label })) }));
+    res.end(JSON.stringify({ status: "ok", actions: Object.values(actions).map(({ id, label }) => ({ id, label })) }));
     return;
   }
 
@@ -1485,7 +1933,8 @@ const server = http.createServer(async (req, res) => {
     req.on("end", () => {
       let input;
       try { input = JSON.parse(body || "{}"); } catch (e) { res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Geçersiz JSON" })); return; }
-      const action = typeof input.id === "string" ? ACTIONS[input.id] : null;
+      const actions = getActions();
+      const action = typeof input.id === "string" ? actions[input.id] : null;
       if (!action) { res.writeHead(404, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Bilinmeyen action" })); return; }
       if (runningActions.size > 0) { res.writeHead(409, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Başka bir action çalışıyor" })); return; }
       const actionId = crypto.randomUUID();
@@ -1502,14 +1951,58 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (pathname === "/api/preview/open" && req.method === "POST") {
+    let body = "";
+    req.on("data", chunk => {
+      body += chunk;
+      if (body.length > 64 * 1024) req.destroy();
+    });
+    req.on("end", () => {
+      try {
+        const data = JSON.parse(body || "{}");
+        const entryPath = typeof data.entryPath === "string" ? data.entryPath.trim() : "";
+        const root = entryPath ? resolveAnyFilePath(entryPath) : null;
+        if (!root || !fs.existsSync(root)) return sendPreviewError(res, 400, "entryPath geçerli değil.");
+        const realEntry = fs.realpathSync(root);
+        if (!isPreviewRootAllowed(realEntry)) return sendPreviewError(res, 403, "Preview yolu izinli köklerin dışında.");
+        const stat = fs.statSync(realEntry);
+        const projectRoot = stat.isDirectory() ? realEntry : path.dirname(realEntry);
+        if (!isStaticWebDirectory(projectRoot)) return sendPreviewError(res, 400, "Static Web projesi bulunamadı.");
+        const previewId = crypto.randomBytes(16).toString("hex");
+        if (previewRoots.size >= MAX_PREVIEW_SESSIONS) {
+          previewRoots.delete(previewRoots.keys().next().value);
+        }
+        previewRoots.set(previewId, projectRoot);
+        const entryName = stat.isDirectory() ? selectPreviewEntry(projectRoot) : path.basename(realEntry);
+        if (!entryName) return sendPreviewError(res, 400, "Preview giriş HTML dosyası bulunamadı.");
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ status: "ok", previewId, url: "http://127.0.0.1:" + PREVIEW_PORT + "/preview/" + previewId + "/" + encodeURIComponent(entryName) }));
+      } catch (e) {
+        sendPreviewError(res, 400, "Geçersiz preview isteği.");
+      }
+    });
+    return;
+  }
+
   // SSE Stream
   if (pathname === "/api/events" && req.method === "GET") {
+    if (req.socket) {
+      try {
+        req.socket.setTimeout(0);
+        req.socket.setKeepAlive(true, 5000);
+        req.socket.setNoDelay(true);
+      } catch (e) {}
+    }
+
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache, no-transform",
       "Connection": "keep-alive",
       "X-Accel-Buffering": "no"
     });
+    if (typeof res.flushHeaders === "function") {
+      try { res.flushHeaders(); } catch (e) {}
+    }
 
     const clientId = Date.now() + "_" + Math.random().toString(36).substr(2, 5);
     const client = { id: clientId, res };
@@ -2199,6 +2692,46 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Get Subagents for a Conversation
+  if (pathname.startsWith("/api/conversations/") && pathname.endsWith("/subagents") && req.method === "GET") {
+    const convId = pathname.replace("/api/conversations/", "").replace("/subagents", "").trim();
+    const subagents = await getSubagentsForConversation(convId);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ status: "ok", conversationId: convId, subagents }));
+    return;
+  }
+
+  // Get Tasks for a Conversation
+  if (pathname.startsWith("/api/conversations/") && pathname.endsWith("/tasks") && req.method === "GET") {
+    const convId = pathname.replace("/api/conversations/", "").replace("/tasks", "").trim();
+    const tasks = await getTasksForConversation(convId);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ status: "ok", conversationId: convId, tasks }));
+    return;
+  }
+
+  // Get Specific Task Log
+  if (pathname.startsWith("/api/conversations/") && pathname.includes("/tasks/") && pathname.endsWith("/log") && req.method === "GET") {
+    const parts = pathname.replace("/api/conversations/", "").split("/tasks/");
+    const convId = parts[0];
+    const taskId = (parts[1] || "").replace("/log", "").trim();
+    const logFile = path.join(BRAIN_DIR, convId, ".system_generated", "tasks", `${taskId}.log`);
+    if (fs.existsSync(logFile)) {
+      try {
+        const content = await fs.promises.readFile(logFile, "utf-8");
+        res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+        res.end(content);
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    } else {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Task log not found" }));
+    }
+    return;
+  }
+
   // Load Specific Conversation
   if (pathname.startsWith("/api/conversations/") && req.method === "GET") {
     const convId = pathname.replace("/api/conversations/", "").trim();
@@ -2420,18 +2953,29 @@ const server = http.createServer(async (req, res) => {
       const targetConvId = data.conversationId;
 
       manualStop = true;
-      if (targetConvId && activeProcesses.has(targetConvId)) {
-        const proc = activeProcesses.get(targetConvId);
-        if (proc && proc.child && proc.child.pid) {
-          try {
-            exec(`pkill -9 -P ${proc.child.pid} 2>/dev/null; kill -9 ${proc.child.pid} 2>/dev/null || true`);
-            proc.child.kill("SIGKILL");
-          } catch (e) {}
+      if (targetConvId) {
+        if (persistentWorkers.has(targetConvId)) {
+          const w = persistentWorkers.get(targetConvId);
+          if (w) w.destroy();
+          persistentWorkers.delete(targetConvId);
         }
-        activeProcesses.delete(targetConvId);
+        if (activeProcesses.has(targetConvId)) {
+          const proc = activeProcesses.get(targetConvId);
+          if (proc && proc.child && proc.child.pid) {
+            try {
+              exec(`pkill -9 -P ${proc.child.pid} 2>/dev/null; kill -9 ${proc.child.pid} 2>/dev/null || true`);
+              proc.child.kill("SIGKILL");
+            } catch (e) {}
+          }
+          activeProcesses.delete(targetConvId);
+        }
         broadcastSSE("generating_done", { conversationId: targetConvId, isGenerating: false });
         broadcastSSE("stopped", { message: "İşlem durduruldu.", conversationId: targetConvId });
       } else {
+        for (const [cId, w] of persistentWorkers.entries()) {
+          try { if (w) w.destroy(); } catch (e) {}
+        }
+        persistentWorkers.clear();
         for (const [cId, proc] of activeProcesses.entries()) {
           if (proc && proc.child && proc.child.pid) {
             try {
@@ -2589,7 +3133,9 @@ const server = http.createServer(async (req, res) => {
 6. Tablolar & Veri Listeleri: Mobil ekranda yatay taşmayı önlemek için geniş çok kolonlu tablolardan kaçının; dikey anahtar-değer madde listeleri veya en fazla 2 kolonlu kompakt tablolar tercih edin. Kod parçalarını ise dil etiketli (\`\`\`kotlin, \`\`\`javascript, \`\`\`bash vb.) fenced block olarak sunun.
 7. Net & Mobil Uyumlu Çıktı: Mobil ekran okunabilirliği için gereksiz dolgu metinlerinden kaçının, net ve yapılandırılmış bilgi sunun.
 8. Etkileşimli Seçim ve Soru Kartları: Kullanıcıya seçenekli bir soru yöneltirken seçenekleri numaralı liste veya şıklar halinde sunun; kullanıcı doğrudan kart üzerinden dokunarak seçebilir veya "✍️ Yazarak Yanıtla" ile serbest yanıt girebilir.
-9. İnteraktif Çoklu Seçim ve Tikli Liste Kartları: Kullanıcıya kurulacak paketler, MCP sunucuları, düzenlenecek dosyalar veya uygulanacak adımlar gibi çoklu seçenekler sunarken maddeleri standart Markdown checklist formatında (\`- [ ] Seçenek 1\`, \`- [ ] Seçenek 2\`) verin. Mobil uygulama bu listeyi dokunulabilir onay kutuları ve altında "Seçilenleri Gönder" butonu içeren interaktif bir seçim kartı olarak render eder.]\n\n`;
+9. İnteraktif Çoklu Seçim ve Tikli Liste Kartları: Kullanıcıya kurulacak paketler, MCP sunucuları, düzenlenecek dosyalar veya uygulanacak adımlar gibi çoklu seçenekler sunarken maddeleri standart Markdown checklist formatında (\`- [ ] Seçenek 1\`, \`- [ ] Seçenek 2\`) verin. Mobil uygulama bu listeyi dokunulabilir onay kutuları ve altında "Seçilenleri Gönder" butonu içeren interaktif bir seçim kartı olarak render eder.
+10. Kesintisiz Görev ve Arka Plan Tamamlama Kuralı (Anti-Premature Exit - ZORUNLU): Bir komut (örneğin gh run watch, git commit/push, test, derleme, script vb.) veya alt-ajan çalıştırırken ASLA iş bitmeden "Arka planda izleniyor / bekleniyor" diyerek kullanıcıya ara mesaj verip TURU BİTİRMEYİN. Oturum CLI üzerinden tek turlu çalışır; siz ara metin yanıtı verdiğiniz an süreç sonlanır ve görev askıda kalır. İzleme komutlarını (watch, poll) ve görevleri doğrudan eşzamanlı olarak tamamlayın, tüm çıktıları toplayın ve kullanıcıya SADECE NİHAİ, TAMAMLANMIŞ sonucu raporlayın.
+11. Alt-Ajan ve Süreç Sorumluluğu: Alt-ajan (\`invoke_subagent\`) veya arka plan görevi (\`run_command\`) başlattığınızda, alt-ajandan veya komuttan nihai sonuç gelene kadar turun açık kalmasını sağlayın; süreç bitmeden kullanıcıya yarım yanıt dönmeyin.]\n\n`;
         }
 
         const fullPromptForAgy = (clientContextInstruction + prompt + attachmentNotice).trim();
@@ -2637,462 +3183,494 @@ const server = http.createServer(async (req, res) => {
           res.end(JSON.stringify({ status: "accepted", prompt }));
         }
 
-        async function startChatProcess(attempt = 1) {
-          if (manualStop) return;
-
-          try {
-            await checkAndRefreshToken();
-          } catch (e) {}
-
-          if (attempt > 1) {
-            botMessage.content = "";
-            botMessage.tools = [];
+        class PersistentWorker {
+          constructor(opts) {
+            this.convId = opts.convId || null;
+            this.activeConvId = opts.convId || (Date.now().toString());
+            this.model = opts.model || "";
+            this.effort = opts.effort || "";
+            this.mode = opts.mode || "";
+            this.useVault = opts.useVault !== false;
+            this.child = null;
+            this.isReady = false;
+            this.isBusy = false;
+            this.currentBotMessage = null;
+            this.currentPrompt = "";
+            this.buffer = "";
+            this.lastResultStatus = null;
+            this.lastResultError = null;
+            this.lastEventTs = Date.now();
+            this.hasReceivedJsonEvents = false;
+            this.hasStreamedChunk = false;
+            this.numTurns = 0;
+            this.diagStartTs = Date.now();
+            this.diagPeakRssKb = 0;
+            this.idleTimer = null;
+            this.initWaiters = [];
+            this.diagRssTimer = null;
           }
 
-          const args = [
-            "-p", fullPromptForAgy,
-            "--dangerously-skip-permissions",
-            "--output-format", "stream-json",
-            "--print-timeout", "60m"
-          ];
+          start(attempt = 1) {
+            if (manualStop) return;
 
-          if (isContinue && (conversationId || currentSession.conversationId)) {
-            args.push("--conversation", conversationId || currentSession.conversationId);
-          }
+            const args = [
+              "--input-format", "stream-json",
+              "--output-format", "stream-json",
+              "--dangerously-skip-permissions",
+              "--print-timeout", "60m"
+            ];
 
-          if (model && model !== "default") {
-            args.push("--model", model);
-          }
+            if (this.convId) {
+              args.push("--conversation", this.convId);
+            }
 
-          if (effort && ["low", "medium", "high"].includes(effort.toLowerCase())) {
-            args.push("--effort", effort.toLowerCase());
-          }
+            if (this.model && this.model !== "default") {
+              args.push("--model", this.model);
+            }
 
-          if (mode && ["plan", "accept-edits"].includes(mode.toLowerCase())) {
-            args.push("--mode", mode.toLowerCase());
-          }
+            if (this.effort && ["low", "medium", "high"].includes(this.effort.toLowerCase())) {
+              args.push("--effort", this.effort.toLowerCase());
+            }
 
-          if (useVault && fs.existsSync(VAULT_DIR)) {
-            args.push("--add-dir", VAULT_DIR);
-          }
+            if (this.mode && ["plan", "accept-edits"].includes(this.mode.toLowerCase())) {
+              args.push("--mode", this.mode.toLowerCase());
+            }
 
-          if (fs.existsSync(UPLOADS_DIR)) {
-            args.push("--add-dir", UPLOADS_DIR);
-          }
+            if (this.useVault && fs.existsSync(VAULT_DIR)) {
+              args.push("--add-dir", VAULT_DIR);
+            }
 
-          const env = {
-            ...process.env,
-            CODEVIBE_ALLOW_FILE_KEYCHAIN: "1",
-            HOME: "/data/data/com.termux/files/home",
-            PREFIX: "/data/data/com.termux/files/usr",
-            TMPDIR: "/data/data/com.termux/files/usr/tmp",
-            LANG: "en_US.UTF-8",
-            LC_ALL: "en_US.UTF-8",
-            PATH: process.env.PATH || "/data/data/com.termux/files/usr/bin:/data/data/com.termux/files/usr/bin/applets",
-            TERM: "xterm-256color",
-            PAGER: "cat",
-            SSL_CERT_FILE: "/data/data/com.termux/files/usr/etc/tls/cert.pem",
-            GODEBUG: "netdns=cgo",
-            AGY_AUTO_UPDATE: "0",
-            TERMUX_VERSION: process.env.TERMUX_VERSION || "0.118.0"
-          };
-          for (const k of ["HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","http_proxy","https_proxy","all_proxy","NODE_TLS_REJECT_UNAUTHORIZED","GIT_SSL_NO_VERIFY"]) {
-            delete env[k];
-          }
+            if (fs.existsSync(UPLOADS_DIR)) {
+              args.push("--add-dir", UPLOADS_DIR);
+            }
 
-          const agyPath = "/data/data/com.termux/files/usr/bin/agy";
-          const child = spawn(agyPath, args, {
-            cwd: process.env.HOME || "/data/data/com.termux/files/home",
-            env: env
-          });
+            const env = {
+              ...process.env,
+              CODEVIBE_ALLOW_FILE_KEYCHAIN: "1",
+              HOME: "/data/data/com.termux/files/home",
+              PREFIX: "/data/data/com.termux/files/usr",
+              TMPDIR: "/data/data/com.termux/files/usr/tmp",
+              LANG: "en_US.UTF-8",
+              LC_ALL: "en_US.UTF-8",
+              PATH: process.env.PATH || "/data/data/com.termux/files/usr/bin:/data/data/com.termux/files/usr/bin/applets",
+              TERM: "xterm-256color",
+              PAGER: "cat",
+              SSL_CERT_FILE: "/data/data/com.termux/files/usr/etc/tls/cert.pem",
+              GODEBUG: "netdns=cgo",
+              AGY_AUTO_UPDATE: "0",
+              TERMUX_VERSION: process.env.TERMUX_VERSION || "0.118.0"
+            };
+            for (const k of ["HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","http_proxy","https_proxy","all_proxy","NODE_TLS_REJECT_UNAUTHORIZED","GIT_SSL_NO_VERIFY"]) {
+              delete env[k];
+            }
 
-          const diagStartTs = Date.now();
-          let diagPeakRssKb = 0;
-          const diagRssTimer = setInterval(() => {
-            try {
-              const rss = process.memoryUsage().rss;
-              if (rss > diagPeakRssKb) diagPeakRssKb = rss;
-            } catch (e) {}
-          }, 2000);
+            const agyPath = "/data/data/com.termux/files/usr/bin/agy";
+            const child = spawn(agyPath, args, {
+              cwd: process.env.HOME || "/data/data/com.termux/files/home",
+              env: env
+            });
 
-          if (child.pid) {
-            try {
-              fs.appendFileSync("/data/data/com.termux/files/home/agy_diag.log",
-                `[${new Date().toISOString()}] spawn pid=${child.pid} attempt=${attempt} args=${JSON.stringify(args)} mem=${Math.round(process.memoryUsage().rss/1048576)}MB\n`);
-            } catch (e) {}
-            exec("taskset -p -c 0-5 " + child.pid + " 2>/dev/null; renice 15 -p " + child.pid + " 2>/dev/null");
-          }
+            this.child = child;
+            activeChildProcess = child;
 
-          let activeConvId = conversationId || currentSession.conversationId || currentSession.id || (Date.now().toString());
-          activeChildProcess = child;
-          activeProcesses.set(activeConvId, { child, botMessage, activeConvId });
-
-          let buffer = "";
-          let lastResultStatus = null;
-          let lastResultError = null;
-          let lastEventTs = Date.now();
-          let hasReceivedJsonEvents = false;
-          let hasStreamedChunk = false;
-          let numTurns = 0;
-          let killedByWatchdog = false;
-          let watchdog = null;
-
-          child.stdout.on("data", (chunk) => {
-            const raw = chunk.toString("utf-8");
-            try { fs.appendFileSync("/data/data/com.termux/files/home/agy_stdout.log", raw); } catch (e) {}
-            buffer += raw;
-
-            const lines = buffer.split("\n");
-            buffer = lines.pop();
-
-            for (const line of lines) {
-              const trimmed = line.trim();
-              if (!trimmed) continue;
-
+            this.diagStartTs = Date.now();
+            this.diagRssTimer = setInterval(() => {
               try {
-                const eventObj = JSON.parse(trimmed);
-                lastEventTs = Date.now();
-                hasReceivedJsonEvents = true;
-
-                if (eventObj.event === "init") {
-                  if (eventObj.conversation_id) {
-                    activeProcesses.delete(activeConvId);
-                    activeConvId = eventObj.conversation_id;
-                    activeProcesses.set(activeConvId, { child, botMessage, activeConvId });
-                    currentSession.conversationId = eventObj.conversation_id;
-                    currentSession.id = eventObj.conversation_id;
-                    broadcastSSE("init", { conversationId: eventObj.conversation_id });
-                    broadcastSSE("generating_start", { conversationId: eventObj.conversation_id, isGenerating: true });
-                  }
-                } else if (eventObj.event === "step_update") {
-                  const update = eventObj.step_update;
-                  if (!update) continue;
-
-                  if (update.text_delta) {
-                    hasStreamedChunk = true;
-                    botMessage.content += update.text_delta;
-                    broadcastSSE("chunk", {
-                      text_delta: update.text_delta,
-                      full_content: botMessage.content,
-                      conversationId: activeConvId
-                    });
-                  }
-
-                  if (update.tool_name || update.tool_info) {
-                    const toolInfo = update.tool_info || update;
-                    const toolName = update.tool_name || toolInfo.name || toolInfo.tool_name || "tool";
-                    const existingToolIndex = botMessage.tools.findIndex(t => t.step_index === update.step_index);
-
-                    const toolErr = (toolInfo && toolInfo.error) ? toolInfo.error : (update.error || null);
-                    const toolErrMsg = toolErr ? (toolErr.message || (typeof toolErr === "string" ? toolErr : JSON.stringify(toolErr))) : null;
-                    const rawState = update.state || toolInfo.state || (toolErr ? "ERROR" : "ACTIVE");
-                    const up = String(rawState).toUpperCase();
-                    const normState = (up === "DONE" || up === "SUCCESS" || up === "COMPLETED" || up === "FINISHED")
-                      ? "DONE"
-                      : (up === "ERROR" || up === "FAILED" || toolErr) ? "ERROR" : rawState;
-
-                    const toolData = {
-                      step_index: update.step_index,
-                      name: toolName,
-                      state: normState,
-                      parameters: toolInfo.parameters || update.parameters || {},
-                      output: toolInfo.output || update.output || null,
-                      duration_seconds: update.duration_seconds || toolInfo.duration_seconds || null,
-                      error: toolErrMsg
-                    };
-
-                    if (existingToolIndex >= 0) {
-                      botMessage.tools[existingToolIndex] = toolData;
-                    } else {
-                      botMessage.tools.push(toolData);
-                    }
-
-                    broadcastSSE("tool_update", {
-                      tool: toolData,
-                      conversationId: activeConvId
-                    });
-                  }
-
-                  if (update.usage) {
-                    botMessage.usage = update.usage;
-                  }
-                } else if (eventObj.event === "command_result") {
-                  const cmd = eventObj.command;
-                  if (cmd && cmd.name === "usage" && cmd.data) {
-                    const formatted = formatUsageMarkdown(cmd.data);
-                    cachedUsageMetrics = parseUsageData(cmd.data);
-                    lastUsageCalculatedAt = Date.now();
-                    botMessage.content = formatted;
-                    hasStreamedChunk = true;
-                    broadcastSSE("chunk", {
-                      text_delta: formatted,
-                      full_content: formatted,
-                      conversationId: activeConvId
-                    });
-                    broadcastSSE("usage_update", { usage: cachedUsageMetrics });
-                  } else if (cmd && (cmd.name === "model" || cmd.name === "models")) {
-                    const activeId = (cmd.data && cmd.data.id) ? cmd.data.id : null;
-                    const formatted = formatModelsMarkdown(activeId);
-                    botMessage.content = formatted;
-                    hasStreamedChunk = true;
-                    broadcastSSE("chunk", {
-                      text_delta: formatted,
-                      full_content: formatted,
-                      conversationId: activeConvId
-                    });
-                  } else if (cmd && cmd.name === "help" && cmd.data) {
-                    const formatted = formatHelpMarkdown(cmd.data);
-                    botMessage.content = formatted;
-                    hasStreamedChunk = true;
-                    broadcastSSE("chunk", {
-                      text_delta: formatted,
-                      full_content: formatted,
-                      conversationId: activeConvId
-                    });
-                  } else if (cmd && cmd.data) {
-                    const formatted = typeof cmd.data === "string" ? cmd.data : "```json\n" + JSON.stringify(cmd.data, null, 2) + "\n```";
-                    botMessage.content = formatted;
-                    hasStreamedChunk = true;
-                    broadcastSSE("chunk", {
-                      text_delta: formatted,
-                      full_content: formatted,
-                      conversationId: activeConvId
-                    });
-                  }
-                } else if (eventObj.event === "result") {
-                  const resObj = eventObj.result;
-                  lastResultStatus = (resObj && resObj.status) ? String(resObj.status).toUpperCase() : null;
-                  lastResultError = (resObj && resObj.error) ? String(resObj.error) : null;
-                  if (typeof (resObj && resObj.num_turns) === "number") {
-                    numTurns = resObj.num_turns;
-                  }
-
-                  if (resObj && resObj.command && resObj.command.name === "usage" && resObj.command.data) {
-                    const formatted = formatUsageMarkdown(resObj.command.data);
-                    cachedUsageMetrics = parseUsageData(resObj.command.data);
-                    lastUsageCalculatedAt = Date.now();
-                    botMessage.content = formatted;
-                    broadcastSSE("usage_update", { usage: cachedUsageMetrics });
-                  } else if (resObj && resObj.command && (resObj.command.name === "model" || resObj.command.name === "models")) {
-                    const activeId = (resObj.command.data && resObj.command.data.id) ? resObj.command.data.id : null;
-                    botMessage.content = formatModelsMarkdown(activeId);
-                  } else if (resObj && resObj.command && resObj.command.name === "help" && resObj.command.data) {
-                    botMessage.content = formatHelpMarkdown(resObj.command.data);
-                  } else if (resObj && resObj.response && (!botMessage.content || botMessage.content.trim().length === 0)) {
-                    botMessage.content = resObj.response;
-                  }
-
-                  if (resObj && resObj.usage) {
-                    const activeContextTokens = calculateSessionContextTokens(currentSession);
-                    const turnTokens = calculateTurnTokens(prompt, botMessage);
-                    botMessage.usage = {
-                      input_tokens: resObj.usage.input_tokens > 0 ? resObj.usage.input_tokens : Math.max(1, Math.round((prompt || "").length / 3.6)),
-                      output_tokens: resObj.usage.output_tokens > 0 ? resObj.usage.output_tokens : Math.max(1, Math.round((botMessage.content || "").length / 3.6)),
-                      thinking_tokens: resObj.usage.thinking_tokens || 0,
-                      cache_read_tokens: resObj.usage.cache_read_tokens || 0,
-                      turn_tokens: turnTokens,
-                      context_tokens: activeContextTokens,
-                      total_tokens: activeContextTokens,
-                      cumulative_tokens: resObj.usage.total_tokens || activeContextTokens
-                    };
-                  }
-                  if (resObj && resObj.conversation_id) {
-                    currentSession.conversationId = resObj.conversation_id;
-                    currentSession.id = resObj.conversation_id;
-                  }
-                }
-              } catch (err) {}
-            }
-          });
-
-          child.stderr.on("data", (chunk) => {
-            const stderrText = chunk.toString("utf-8");
-            lastEventTs = Date.now();
-            try { fs.appendFileSync("/data/data/com.termux/files/home/agy_stderr.log", stderrText); } catch (e) {}
-
-            // Detect agy requesting OAuth authorization
-            const authUrlMatch = stderrText.match(/https:\/\/accounts\.google\.com\/o\/oauth2\/auth\S+/);
-            if (authUrlMatch) {
-              const detectedUrl = authUrlMatch[0];
-              authWaitingChildProcess = child;
-              broadcastSSE("auth_required", {
-                authUrl: detectedUrl,
-                error: "Google oturumu gerekiyor. Lütfen açılan tarayıcıda yetkilendirip kodu kopyalayın.",
-                isWaitingCode: true,
-                conversationId: activeConvId
-              });
-            }
-
-            broadcastSSE("stderr", { text: stderrText, conversationId: activeConvId });
-          });
-
-          child.on("error", (err) => {
-            if (watchdog) clearInterval(watchdog);
-            if (diagRssTimer) clearInterval(diagRssTimer);
-            if (authWaitingChildProcess === child) authWaitingChildProcess = null;
-            if (activeChildProcess === child) activeChildProcess = null;
-            activeProcesses.delete(activeConvId);
-            currentSession.isGenerating = false;
-            broadcastSSE("generating_done", { conversationId: activeConvId, isGenerating: false });
-            try {
-              fs.appendFileSync("/data/data/com.termux/files/home/agy_diag.log",
-                `[${new Date().toISOString()}] ERR ${err.message} mem=${Math.round(process.memoryUsage().rss/1048576)}MB\n`);
-            } catch (e) {}
-            botMessage.state = "error";
-            botMessage.content += "\n\n⚠️ *Hata: " + err.message + "*";
-            broadcastSSE("error", { error: err.message, conversationId: activeConvId });
-          });
-
-          child.on("close", (code, signal) => {
-            if (watchdog) clearInterval(watchdog);
-            if (diagRssTimer) clearInterval(diagRssTimer);
-            if (authWaitingChildProcess === child) authWaitingChildProcess = null;
-            if (activeChildProcess === child) activeChildProcess = null;
-            activeProcesses.delete(activeConvId);
+                const rss = process.memoryUsage().rss;
+                if (rss > this.diagPeakRssKb) this.diagPeakRssKb = rss;
+              } catch (e) {}
+            }, 2000);
 
             if (child.pid) {
               try {
                 fs.appendFileSync("/data/data/com.termux/files/home/agy_diag.log",
-                  `[${new Date().toISOString()}] CLOSE pid=${child.pid} code=${code} signal=${signal} lastResultStatus=${lastResultStatus} durS=${Math.round((Date.now()-diagStartTs)/1000)} peakRss=${(diagPeakRssKb/1048576).toFixed(1)}MB attempt=${attempt}\n`);
+                  `[${new Date().toISOString()}] spawn persistent pid=${child.pid} attempt=${attempt} convId=${this.convId} mem=${Math.round(process.memoryUsage().rss/1048576)}MB\n`);
               } catch (e) {}
+              exec("taskset -p -c 0-5 " + child.pid + " 2>/dev/null; renice 15 -p " + child.pid + " 2>/dev/null");
             }
 
-            if (manualStop) {
-              manualStop = false;
+            child.stdout.on("data", (chunk) => {
+              const raw = chunk.toString("utf-8");
+              try { fs.appendFileSync("/data/data/com.termux/files/home/agy_stdout.log", raw); } catch (e) {}
+              this.buffer += raw;
+
+              const lines = this.buffer.split("\n");
+              this.buffer = lines.pop();
+
+              for (const line of lines) {
+                const trimmed = line.trim();
+                if (!trimmed) continue;
+
+                try {
+                  const eventObj = JSON.parse(trimmed);
+                  this.lastEventTs = Date.now();
+                  this.hasReceivedJsonEvents = true;
+
+                  if (eventObj.event === "init") {
+                    if (eventObj.conversation_id) {
+                      activeProcesses.delete(this.activeConvId);
+                      if (this.convId) persistentWorkers.delete(this.convId);
+                      this.convId = eventObj.conversation_id;
+                      this.activeConvId = eventObj.conversation_id;
+                      persistentWorkers.set(this.convId, this);
+                      activeProcesses.set(this.activeConvId, { child, botMessage: this.currentBotMessage, activeConvId: this.activeConvId });
+                      currentSession.conversationId = eventObj.conversation_id;
+                      currentSession.id = eventObj.conversation_id;
+                      broadcastSSE("init", { conversationId: eventObj.conversation_id });
+                      broadcastSSE("generating_start", { conversationId: eventObj.conversation_id, isGenerating: true });
+                    }
+                    this.isReady = true;
+                    while (this.initWaiters.length > 0) {
+                      const cb = this.initWaiters.shift();
+                      try { cb(); } catch (e) {}
+                    }
+                  } else if (eventObj.event === "step_update") {
+                    const update = eventObj.step_update;
+                    if (!update) continue;
+
+                    if (update.text_delta && this.currentBotMessage) {
+                      this.hasStreamedChunk = true;
+                      this.currentBotMessage.content += update.text_delta;
+                      broadcastSSE("chunk", {
+                        text_delta: update.text_delta,
+                        full_content: this.currentBotMessage.content,
+                        conversationId: this.activeConvId
+                      });
+                    }
+
+                    if ((update.tool_name || update.tool_info) && this.currentBotMessage) {
+                      const toolInfo = update.tool_info || update;
+                      const toolName = update.tool_name || toolInfo.name || toolInfo.tool_name || "tool";
+                      const existingToolIndex = this.currentBotMessage.tools.findIndex(t => t.step_index === update.step_index);
+
+                      const toolErr = (toolInfo && toolInfo.error) ? toolInfo.error : (update.error || null);
+                      const toolErrMsg = toolErr ? (toolErr.message || (typeof toolErr === "string" ? toolErr : JSON.stringify(toolErr))) : null;
+                      const rawState = update.state || toolInfo.state || (toolErr ? "ERROR" : "ACTIVE");
+                      const up = String(rawState).toUpperCase();
+                      const normState = (up === "DONE" || up === "SUCCESS" || up === "COMPLETED" || up === "FINISHED")
+                        ? "DONE"
+                        : (up === "ERROR" || up === "FAILED" || toolErr) ? "ERROR" : rawState;
+
+                      const toolData = {
+                        step_index: update.step_index,
+                        name: toolName,
+                        state: normState,
+                        parameters: toolInfo.parameters || update.parameters || {},
+                        output: toolInfo.output || update.output || null,
+                        duration_seconds: update.duration_seconds || toolInfo.duration_seconds || null,
+                        error: toolErrMsg
+                      };
+
+                      if (existingToolIndex >= 0) {
+                        this.currentBotMessage.tools[existingToolIndex] = toolData;
+                      } else {
+                        this.currentBotMessage.tools.push(toolData);
+                      }
+
+                      broadcastSSE("tool_update", {
+                        tool: toolData,
+                        conversationId: this.activeConvId
+                      });
+
+                      if (toolName.includes("subagent")) {
+                        getSubagentsForConversation(this.activeConvId).then(subs => {
+                          if (subs.length > 0) {
+                            broadcastSSE("subagents_update", {
+                              conversationId: this.activeConvId,
+                              subagents: subs
+                            });
+                          }
+                        }).catch(() => {});
+                      }
+                      if (toolName.includes("task") || toolName === "run_command") {
+                        getTasksForConversation(this.activeConvId).then(tsks => {
+                          if (tsks.length > 0) {
+                            broadcastSSE("tasks_update", {
+                              conversationId: this.activeConvId,
+                              tasks: tsks
+                            });
+                          }
+                        }).catch(() => {});
+                      }
+                    }
+
+                    if (update.usage && this.currentBotMessage) {
+                      this.currentBotMessage.usage = update.usage;
+                    }
+                  } else if (eventObj.event === "result") {
+                    const resObj = eventObj.result;
+                    this.lastResultStatus = (resObj && resObj.status) ? String(resObj.status).toUpperCase() : null;
+                    this.lastResultError = (resObj && resObj.error) ? String(resObj.error) : null;
+                    if (typeof (resObj && resObj.num_turns) === "number") {
+                      this.numTurns = resObj.num_turns;
+                    }
+
+                    if (this.currentBotMessage) {
+                      if (resObj && resObj.response && (!this.currentBotMessage.content || this.currentBotMessage.content.trim().length === 0)) {
+                        this.currentBotMessage.content = resObj.response;
+                      }
+
+                      if (resObj && resObj.usage) {
+                        const activeContextTokens = calculateSessionContextTokens(currentSession);
+                        const turnTokens = calculateTurnTokens(this.currentPrompt, this.currentBotMessage);
+                        this.currentBotMessage.usage = {
+                          input_tokens: resObj.usage.input_tokens > 0 ? resObj.usage.input_tokens : Math.max(1, Math.round((this.currentPrompt || "").length / 3.6)),
+                          output_tokens: resObj.usage.output_tokens > 0 ? resObj.usage.output_tokens : Math.max(1, Math.round((this.currentBotMessage.content || "").length / 3.6)),
+                          thinking_tokens: resObj.usage.thinking_tokens || 0,
+                          cache_read_tokens: resObj.usage.cache_read_tokens || 0,
+                          turn_tokens: turnTokens,
+                          context_tokens: activeContextTokens,
+                          total_tokens: activeContextTokens,
+                          cumulative_tokens: resObj.usage.total_tokens || activeContextTokens
+                        };
+                      }
+
+                      // Title & project tag update
+                      if (this.activeConvId && this.currentBotMessage.content) {
+                        const m = this.currentBotMessage.content.match(/<!--__AGY_SESSION_TITLE:\s*([^\n\r]+?)\s*__-->/) ||
+                                  this.currentBotMessage.content.match(/<!--SESSION_TITLE:\s*([^\n\r]+?)\s*-->/);
+                        if (m && m[1]) {
+                          const newTitle = m[1].trim();
+                          if (!isPlaceholderTitle(newTitle)) {
+                            currentSession.title = newTitle;
+                            const cached = brainConversationsCache.get(this.activeConvId);
+                            if (cached) {
+                              cached.title = newTitle;
+                              brainConversationsCache.set(this.activeConvId, cached);
+                            }
+                            broadcastSSE("title_updated", { conversationId: this.activeConvId, title: newTitle });
+                          }
+                        }
+
+                        const pm = this.currentBotMessage.content.match(/<!--__AGY_PROJECT_TAG:\s*([^\n\r]+?)\s*__-->/) ||
+                                   this.currentBotMessage.content.match(/<!--__AGY_PROJECT:\s*([^\n\r]+?)\s*__-->/) ||
+                                   this.currentBotMessage.content.match(/<!--PROJECT_TAG:\s*([^\n\r]+?)\s*-->/);
+                        if (pm && pm[1]) {
+                          const newProject = pm[1].trim().replace(/^\[|\]$/g, "");
+                          if (newProject && newProject.length > 1 && !isPlaceholderTitle(newProject)) {
+                            currentSession.projectName = newProject;
+                            currentSession.projectTag = newProject;
+                            const cached = brainConversationsCache.get(this.activeConvId);
+                            if (cached) {
+                              cached.projectName = newProject;
+                              cached.projectTag = newProject;
+                              brainConversationsCache.set(this.activeConvId, cached);
+                            }
+                            broadcastSSE("project_updated", { conversationId: this.activeConvId, projectName: newProject, projectTag: newProject });
+                          }
+                        }
+                      }
+
+                      this.currentBotMessage.state = "done";
+                      broadcastSSE("done", {
+                        exitCode: 0,
+                        botMessage: this.currentBotMessage,
+                        conversationId: this.activeConvId
+                      });
+                    }
+
+                    this.isBusy = false;
+                    currentSession.isGenerating = false;
+                    activeProcesses.delete(this.activeConvId);
+                    broadcastSSE("generating_done", { conversationId: this.activeConvId, isGenerating: false });
+                    this.resetIdleTimer();
+                  }
+                } catch (err) {}
+              }
+            });
+
+            child.stderr.on("data", (chunk) => {
+              const stderrText = chunk.toString("utf-8");
+              this.lastEventTs = Date.now();
+              try { fs.appendFileSync("/data/data/com.termux/files/home/agy_stderr.log", stderrText); } catch (e) {}
+
+              const authUrlMatch = stderrText.match(/https:\/\/accounts\.google\.com\/o\/oauth2\/auth\S+/);
+              if (authUrlMatch) {
+                const detectedUrl = authUrlMatch[0];
+                authWaitingChildProcess = child;
+                broadcastSSE("auth_required", {
+                  authUrl: detectedUrl,
+                  error: "Google oturumu gerekiyor. Lütfen açılan tarayıcıda yetkilendirip kodu kopyalayın.",
+                  isWaitingCode: true,
+                  conversationId: this.activeConvId
+                });
+              }
+
+              broadcastSSE("stderr", { text: stderrText, conversationId: this.activeConvId });
+            });
+
+            child.on("error", (err) => {
+              this.cleanup();
               currentSession.isGenerating = false;
-              broadcastSSE("generating_done", { conversationId: activeConvId, isGenerating: false });
-              return;
-            }
+              broadcastSSE("generating_done", { conversationId: this.activeConvId, isGenerating: false });
+              if (this.currentBotMessage) {
+                this.currentBotMessage.state = "error";
+                this.currentBotMessage.content += "\n\n⚠️ *Hata: " + err.message + "*";
+              }
+              broadcastSSE("error", { error: err.message, conversationId: this.activeConvId });
+            });
 
-            const errStr = String(lastResultError || "").toLowerCase();
-            const isTransientAuthError = (
-              (lastResultStatus === "ERROR" && (/authentication failed or timed out|network error|econnreset|etimedout|socket hang up/i.test(errStr))) ||
-              (code !== 0 && !hasReceivedJsonEvents && !hasStreamedChunk)
-            ) && !hasStreamedChunk && numTurns === 0;
+            child.on("close", (code, signal) => {
+              const wasBusy = this.isBusy;
+              this.cleanup();
 
-            if (isTransientAuthError && attempt < 2) {
-              try {
-                fs.appendFileSync("/data/data/com.termux/files/home/agy_diag.log",
-                  `[${new Date().toISOString()}] AUTO_RETRY triggered (attempt ${attempt} -> ${attempt + 1}) due to transient auth/socket error: "${lastResultError || 'exit_' + code}"\n`);
-              } catch (e) {}
-              setTimeout(() => {
-                startChatProcess(attempt + 1);
-              }, 600);
-              return;
-            }
-
-            currentSession.isGenerating = false;
-            broadcastSSE("generating_done", { conversationId: activeConvId, isGenerating: false });
-
-            const tokenFile = "/data/data/com.termux/files/home/.gemini/antigravity-cli/antigravity-oauth-token";
-            let tokenFileExists = false;
-            try {
-              tokenFileExists = fs.existsSync(tokenFile) && fs.statSync(tokenFile).size > 10;
-            } catch (e) {}
-
-            const isExplicitPermanentAuth = (/please log in|not logged into antigravity|oauth_token_revoked|invalid_grant|unauthorized_client/i.test(errStr)) || (!tokenFileExists && /authentication failed|login required/i.test(errStr));
-
-            if (isExplicitPermanentAuth) {
-              botMessage.state = "error";
-              botMessage.content = "⚠️ *AGY kimlik doğrulaması gerekiyor. Lütfen ayarlar üzerinden terminal ile tekrar giriş yapın.*";
-              broadcastSSE("auth_required", { error: lastResultError || "Kimlik doğrulaması gerekli.", needsReauth: true, conversationId: activeConvId });
-              broadcastSSE("stopped", { reason: "auth_required", conversationId: activeConvId });
-              return;
-            }
-
-            const hasProducedOutput = hasStreamedChunk || (botMessage.content && botMessage.content.trim().length > 0) || (botMessage.tools && botMessage.tools.length > 0);
-            const isSuccess = (lastResultStatus === "SUCCESS") || (code === 0 && hasProducedOutput);
-            const failed = (!isSuccess && code !== 0 && !hasProducedOutput) || killedByWatchdog || (lastResultStatus === "ERROR" && !hasProducedOutput);
-
-            // Extract AI session title and project tag if present in botMessage.content
-            if (activeConvId && botMessage.content) {
-              const m = botMessage.content.match(/<!--__AGY_SESSION_TITLE:\s*([^\n\r]+?)\s*__-->/) ||
-                        botMessage.content.match(/<!--SESSION_TITLE:\s*([^\n\r]+?)\s*-->/);
-              if (m && m[1]) {
-                const newTitle = m[1].trim();
-                if (!isPlaceholderTitle(newTitle)) {
-                  currentSession.title = newTitle;
-                  const cached = brainConversationsCache.get(activeConvId);
-                  if (cached) {
-                    cached.title = newTitle;
-                    brainConversationsCache.set(activeConvId, cached);
-                  }
-                  broadcastSSE("title_updated", { conversationId: activeConvId, title: newTitle });
-                }
+              if (manualStop) {
+                manualStop = false;
+                currentSession.isGenerating = false;
+                broadcastSSE("generating_done", { conversationId: this.activeConvId, isGenerating: false });
+                return;
               }
 
-              const pm = botMessage.content.match(/<!--__AGY_PROJECT_TAG:\s*([^\n\r]+?)\s*__-->/) ||
-                         botMessage.content.match(/<!--__AGY_PROJECT:\s*([^\n\r]+?)\s*__-->/) ||
-                         botMessage.content.match(/<!--PROJECT_TAG:\s*([^\n\r]+?)\s*-->/);
-              if (pm && pm[1]) {
-                const newProject = pm[1].trim().replace(/^\[|\]$/g, "");
-                if (newProject && newProject.length > 1 && !isPlaceholderTitle(newProject)) {
-                  currentSession.projectName = newProject;
-                  currentSession.projectTag = newProject;
-                  const cached = brainConversationsCache.get(activeConvId);
-                  if (cached) {
-                    cached.projectName = newProject;
-                    cached.projectTag = newProject;
-                    brainConversationsCache.set(activeConvId, cached);
-                  }
-                  broadcastSSE("project_updated", { conversationId: activeConvId, projectName: newProject, projectTag: newProject });
+              if (wasBusy) {
+                currentSession.isGenerating = false;
+                broadcastSSE("generating_done", { conversationId: this.activeConvId, isGenerating: false });
+                if (this.currentBotMessage && (!this.currentBotMessage.content || this.currentBotMessage.content.trim().length === 0)) {
+                  this.currentBotMessage.state = "error";
+                  this.currentBotMessage.content = "⚠️ *Üretim süreci sonlandı (exit " + code + ").*";
+                  broadcastSSE("error", { error: this.lastResultError || "Process exited unexpectedly", conversationId: this.activeConvId });
                 }
               }
-            }
+            });
+          }
 
-            if (failed) {
-              let errMsg = lastResultError;
-              let isAgentLimit = false;
+          sendTurn(promptText, botMsg) {
+            this.currentBotMessage = botMsg;
+            this.currentPrompt = promptText;
+            this.isBusy = true;
+            this.hasStreamedChunk = false;
+            this.lastResultStatus = null;
+            this.lastResultError = null;
+            if (this.idleTimer) clearTimeout(this.idleTimer);
+            activeProcesses.set(this.activeConvId, { child: this.child, botMessage: botMsg, activeConvId: this.activeConvId });
 
-              if (errMsg && /429|resource_exhausted|rate_limit|rate limit|quota exceeded|too many requests/i.test(errMsg)) {
-                errMsg = "⚠️ Model Hız/Kota Sınırı (HTTP 429 Rate Limit / Quota Exceeded): AI model sağlayıcısının kota sınırına veya istek hız limitine ulaşıldı. Lütfen 1-2 dakika bekleyin veya Ayarlar'dan başka bir modele (örn. gemini-3.7-flash-medium veya gemini-3.7-flash) geçiş yapın.";
-              } else if (errMsg && /503|500|unavailable|service unavailable|temporary failure in name resolution|connection abort|software caused connection abort/i.test(errMsg)) {
-                errMsg = "⚠️ AI Servis/Sunucu Kesintisi (HTTP 500/503 Service Unavailable / Network Error): Google Cloud / AI sağlayıcısı geçici olarak hizmet veremiyor veya ağ kesintisi yaşandı. Lütfen birazdan tekrar deneyin.";
-              } else if (errMsg && /agent execution terminated due to error/i.test(errMsg)) {
-                isAgentLimit = true;
-                if (botMessage.tools && botMessage.tools.length > 0) {
-                  errMsg = "Ajan oturum adım/token sınırına ulaştı (Agent limit). Yapılan araç çağrıları ve dosya değişiklikleri başarıyla uygulandı. Sohbet geçmişi çok uzadığı için yeni bir sohbet başlatmanız önerilir.";
-                } else {
-                  errMsg = "Ajan oturum veya token sınırı nedeniyle sonlandırıldı (Agent execution limit). Sohbet geçmişi dolmuş olabilir, lütfen yeni bir sohbet ('+ Yeni Sohbet') başlatmayı deneyin.";
-                }
-              } else if (!errMsg) {
-                if (killedByWatchdog) {
-                  errMsg = "Üretim zaman aşımına uğradı: uzun süredir aktivite gelmedi (donmuş komut veya backend takılması olabilir). İşlem durduruldu.";
-                } else if (lastResultStatus) {
-                  errMsg = "Üretim başarısız oldu (durum: " + lastResultStatus + (code ? ", exit " + code : "") + ")";
-                } else if (code === null && signal) {
-                  const sigName = String(signal).toUpperCase().startsWith("SIG") ? String(signal) : "SIG" + signal;
-                  errMsg = "Üretim süreci " + sigName + " sinyaliyle sonlandırıldı (" + sigName + " = OOM/bellek baskısı veya dış müdahale). Sonuç alınamadı.";
-                } else {
-                  errMsg = "Üretim beklenmeden sonlandı (sonuç alınamadı, exit " + code + ").";
-                }
-              }
-
-              botMessage.state = isAgentLimit && botMessage.tools.length > 0 ? "done" : "error";
-              if (!botMessage.content || !botMessage.content.trim()) {
-                botMessage.content = "⚠️ *" + errMsg + "*";
+            const doSend = () => {
+              if (!this.child || this.child.exitCode !== null || !this.child.stdin || this.child.stdin.destroyed) {
+                this.start(1);
+                this.initWaiters.push(() => {
+                  this.writePayload(promptText);
+                });
               } else {
-                botMessage.content += "\n\n⚠️ *" + errMsg + "*";
+                this.writePayload(promptText);
               }
-              broadcastSSE(isAgentLimit && botMessage.tools.length > 0 ? "done" : "error", {
-                error: errMsg,
-                exitCode: code,
-                fatal: !isAgentLimit,
-                botMessage: botMessage,
-                conversationId: activeConvId
-              });
+            };
+
+            if (!this.isReady) {
+              this.initWaiters.push(doSend);
             } else {
-              botMessage.state = "done";
-              broadcastSSE("done", {
-                exitCode: code,
-                botMessage: botMessage,
-                conversationId: activeConvId
-              });
+              doSend();
             }
-          });
+          }
+
+          writePayload(promptText) {
+            try {
+              const payload = JSON.stringify({
+                event: "user",
+                message: {
+                  content: [{ type: "text", text: promptText }]
+                }
+              }) + "\n";
+              this.child.stdin.write(payload);
+            } catch (e) {
+              this.cleanup();
+            }
+          }
+
+          resetIdleTimer() {
+            if (this.idleTimer) clearTimeout(this.idleTimer);
+            this.idleTimer = setTimeout(() => {
+              this.destroy();
+            }, 30 * 60 * 1000);
+          }
+
+          cleanup() {
+            if (this.diagRssTimer) clearInterval(this.diagRssTimer);
+            if (this.idleTimer) clearTimeout(this.idleTimer);
+            if (authWaitingChildProcess === this.child) authWaitingChildProcess = null;
+            if (activeChildProcess === this.child) activeChildProcess = null;
+            if (this.convId) persistentWorkers.delete(this.convId);
+            activeProcesses.delete(this.activeConvId);
+            this.isReady = false;
+            this.isBusy = false;
+          }
+
+          destroy() {
+            this.cleanup();
+            if (this.child && this.child.exitCode === null) {
+              try {
+                this.child.stdin.end();
+                setTimeout(() => {
+                  if (this.child && this.child.exitCode === null) {
+                    this.child.kill("SIGTERM");
+                  }
+                }, 1000);
+              } catch (e) {}
+            }
+          }
         }
 
-        startChatProcess(1);
+        async function handleChatExecution() {
+          try {
+            await checkAndRefreshToken();
+          } catch (e) {}
+
+          let switchNotice = null;
+          try {
+            const switchRes = checkAndAutoSwitchAccount();
+            if (switchRes && switchRes.switched) {
+              const fromLabel = switchRes.fromEmail ? `\`${switchRes.fromEmail}\`` : `\`${switchRes.from}\``;
+              const toLabel = switchRes.toEmail ? `**\`${switchRes.toEmail}\`**` : `**\`${switchRes.to}\`**`;
+              switchNotice = `> 🔄 **[Otomatik Hesap Geçişi]** ${fromLabel} hesabının kotası azaldığı için ${toLabel} hesabına geçildi.\n\n`;
+              const targetId = conversationId || currentSession.conversationId;
+              const existingWorker = targetId ? persistentWorkers.get(targetId) : null;
+              if (existingWorker) {
+                existingWorker.destroy();
+                persistentWorkers.delete(targetId);
+              }
+              broadcastSSE("account_switched", {
+                from: switchRes.from,
+                to: switchRes.to,
+                fromEmail: switchRes.fromEmail,
+                toEmail: switchRes.toEmail,
+                reason: switchRes.reason,
+                conversationId: activeConvId
+              });
+            }
+          } catch (e) {}
+
+          const targetId = conversationId || currentSession.conversationId;
+          let worker = targetId ? persistentWorkers.get(targetId) : null;
+
+          // If worker exists but config changed (model/effort/mode), destroy and re-create
+          if (worker && (worker.model !== model || worker.effort !== effort || worker.mode !== mode)) {
+            worker.destroy();
+            worker = null;
+          }
+
+          if (!worker) {
+            worker = new PersistentWorker({
+              convId: targetId,
+              model: model,
+              effort: effort,
+              mode: mode,
+              useVault: useVault
+            });
+            worker.start(1);
+            if (targetId) persistentWorkers.set(targetId, worker);
+          }
+
+          if (switchNotice && botMessage) {
+            botMessage.content = switchNotice;
+            broadcastSSE("chunk", {
+              text_delta: switchNotice,
+              full_content: botMessage.content,
+              conversationId: activeConvId
+            });
+          }
+
+          worker.sendTurn(fullPromptForAgy, botMessage);
+        }
+
+        handleChatExecution();
 
       } catch (err) {
         if (!res.headersSent) {
@@ -3106,6 +3684,11 @@ const server = http.createServer(async (req, res) => {
 
   res.writeHead(404, { "Content-Type": "application/json" });
   res.end(JSON.stringify({ error: "Endpoint Not Found", path: pathname }));
+});
+
+const previewServer = http.createServer(handlePreviewRequest);
+previewServer.listen(PREVIEW_PORT, PREVIEW_HOST, () => {
+  console.log("Preview server listening on http://" + PREVIEW_HOST + ":" + PREVIEW_PORT);
 });
 
 server.listen(PORT, HOST, () => {
