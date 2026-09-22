@@ -1,0 +1,13 @@
+{
+  "enabled": [
+    "agy-start",
+    "agy-stop",
+    "vault-sync",
+    "codex-start",
+    "codex-stop",
+    "opencode-start",
+    "opencode-stop",
+    "cline-start",
+    "cline-stop"
+  ]
+}

@@ -7,11 +7,30 @@ const { spawn, exec } = require("child_process");
 
 // Deliberately closed action registry: clients may select an id only.  They can
 // never provide an executable, cwd, or arguments.
-const ACTIONS = Object.freeze({
+const BUILTIN_ACTIONS = Object.freeze({
   "agy-start": { id: "agy-start", label: "AGY başlat", executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/.termux/tasker/agy-web-start.sh"] },
   "agy-stop": { id: "agy-stop", label: "AGY durdur", executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/.termux/tasker/agy-web-stop.sh"] },
-  "vault-sync": { id: "vault-sync", label: "Vault senkronize et", executable: "/data/data/com.termux/files/usr/bin/python3", args: ["/data/data/com.termux/files/home/vault/beyin.py", "sync"] }
+  "vault-sync": { id: "vault-sync", label: "Vault senkronize et", executable: "/data/data/com.termux/files/usr/bin/python3", args: ["/data/data/com.termux/files/home/vault/beyin.py", "sync"] },
+  "codex-start": { id: "codex-start", label: "Codex servisini başlat", executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/antigravity-termux-server/bin/codex-web", "start"] },
+  "codex-stop": { id: "codex-stop", label: "Codex servisini durdur", executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/antigravity-termux-server/bin/codex-web", "stop"] },
+  "opencode-start": { id: "opencode-start", label: "OpenCode servisini başlat", executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/antigravity-termux-server/bin/opencode-web", "start"] },
+  "opencode-stop": { id: "opencode-stop", label: "OpenCode servisini durdur", executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/antigravity-termux-server/bin/opencode-web", "stop"] },
+  "cline-start": { id: "cline-start", label: "Cline servisini başlat", executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/antigravity-termux-server/bin/cline-web", "start"] },
+  "cline-stop": { id: "cline-stop", label: "Cline servisini durdur", executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/antigravity-termux-server/bin/cline-web", "stop"] }
 });
+const ACTIONS_MANIFEST = "/data/data/com.termux/files/home/.config/terminal-hub/actions.json";
+function getActions() {
+  if (!fs.existsSync(ACTIONS_MANIFEST)) return BUILTIN_ACTIONS;
+  try {
+    const manifest = JSON.parse(fs.readFileSync(ACTIONS_MANIFEST, "utf8"));
+    if (!Array.isArray(manifest.enabled)) return BUILTIN_ACTIONS;
+    const enabled = new Set(manifest.enabled.filter(id => typeof id === "string"));
+    return Object.fromEntries(Object.entries(BUILTIN_ACTIONS).filter(([id]) => enabled.has(id)));
+  } catch (err) {
+    console.error("[ACTIONS] Invalid manifest; using built-in registry:", err.message);
+    return BUILTIN_ACTIONS;
+  }
+}
 const ACTION_TIMEOUT_MS = 120000;
 const runningActions = new Map();
 
@@ -28,6 +47,8 @@ process.on("unhandledRejection", (reason) => {
 
 const PORT = process.env.PORT || 8080;
 const HOST = process.env.HOST || "0.0.0.0";
+const PREVIEW_PORT = Number(process.env.PREVIEW_PORT || 8081);
+const PREVIEW_HOST = "127.0.0.1";
 const DATA_DIR = path.join(__dirname, "data");
 const SESSIONS_DIR = path.join(DATA_DIR, "sessions");
 const UPLOADS_DIR = "/data/data/com.termux/files/home/uploads";
@@ -37,6 +58,27 @@ const BUILTIN_SKILLS_DIR = "/data/data/com.termux/files/home/.gemini/antigravity
 const BRAIN_DIR = "/data/data/com.termux/files/home/.gemini/antigravity-cli/brain";
 const MODELS_CACHE_FILE = path.join(DATA_DIR, "models_cache.json");
 const USAGE_CACHE_FILE = path.join(DATA_DIR, "usage_cache.json");
+const BRAIN_CACHE_FILE = path.join(DATA_DIR, "brain_cache.json");
+const previewRoots = new Map();
+const MAX_PREVIEW_SESSIONS = 32;
+
+function getPreviewAllowedRoots() {
+  const configured = process.env.PREVIEW_ALLOWED_ROOTS;
+  const candidates = configured
+    ? configured.split(path.delimiter).filter(Boolean)
+    : [process.env.HOME || "/data/data/com.termux/files/home", "/storage/emulated/0"];
+  return candidates.flatMap(candidate => {
+    try {
+      const real = fs.realpathSync(candidate);
+      return fs.statSync(real).isDirectory() ? [real] : [];
+    } catch (e) {
+      return [];
+    }
+  });
+}
+
+const PREVIEW_ALLOWED_ROOTS = getPreviewAllowedRoots();
+
 
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 if (!fs.existsSync(SESSIONS_DIR)) fs.mkdirSync(SESSIONS_DIR, { recursive: true });

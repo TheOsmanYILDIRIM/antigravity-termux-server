@@ -174,3 +174,10 @@ agy-ci-watch "$PWD" >/dev/null 2>&1 &
 ## 📄 Lisans
 
 Bu proje MIT lisansı ile korunmaktadır.
+# Terminal Hub
+
+Terminal actions are served dynamically by `/api/actions`. To choose which
+known actions are exposed, copy `actions.json.example` to
+`~/.config/terminal-hub/actions.json` and edit only its `enabled` ID list.
+Executable paths and arguments remain server-owned; unknown IDs are ignored.
+Without a manifest, the built-in action registry is used.
