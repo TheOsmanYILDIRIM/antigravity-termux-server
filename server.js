@@ -1888,9 +1888,11 @@ const server = http.createServer(async (req, res) => {
   if (pathname === "/api/terminal/plugins" && req.method === "GET") {
     const actions = getActions();
     const grouped = new Map();
-    for (const { id, label } of Object.values(actions)) {
-      const service = id === "vault-sync" ? "vault" : id.replace(/-(start|stop)$/, "");
-      if (!grouped.has(service)) grouped.set(service, { id: service, name: service, enabled: true, actions: [] });
+    for (const action of Object.values(actions)) {
+      const { id, label, category } = action;
+      const service = category ? category.toLowerCase().replace(/\s+/g, "-") : (id === "vault-sync" ? "vault" : id.replace(/-(start|stop)$/, ""));
+      const name = category || service;
+      if (!grouped.has(service)) grouped.set(service, { id: service, name, enabled: true, actions: [] });
       grouped.get(service).actions.push({ id, label });
     }
     const plugins = [...grouped.values()];
