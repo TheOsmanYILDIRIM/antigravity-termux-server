@@ -34,15 +34,19 @@ fi
 echo "🔗 CLI kısayolları ($BIN_DIR) yapılandırılıyor..."
 chmod +x "$REPO_DIR/bin/agy-web"
 chmod +x "$REPO_DIR/bin/agy-ci-watch"
+[ -f "$REPO_DIR/bin/agy-bridge" ] && chmod +x "$REPO_DIR/bin/agy-bridge"
 
 ln -sf "$REPO_DIR/bin/agy-web" "$BIN_DIR/agy-web"
 ln -sf "$REPO_DIR/bin/agy-ci-watch" "$BIN_DIR/agy-ci-watch"
+[ -f "$REPO_DIR/bin/agy-bridge" ] && ln -sf "$REPO_DIR/bin/agy-bridge" "$BIN_DIR/agy-bridge"
 
 # 3. Gerekli dizin yapısını hazırlama
 echo "📁 Çalışma dizinleri hazırlanıyor..."
 mkdir -p "$REPO_DIR/data/sessions"
 mkdir -p "$HOME/uploads"
 mkdir -p "$HOME/agy-vault"
+mkdir -p "$HOME/.config/antigravity-bridge"
+mkdir -p "$HOME/.cache/antigravity-bridge"
 
 # 4. Termux Optimizasyonları
 echo "⚡ Termux optimizasyonları kontrol ediliyor..."
@@ -74,6 +78,7 @@ echo "   agy-web status   -> Sunucu durumunu ve PID kontrol eder"
 echo "   agy-web stop     -> Sunucuyu durdurur"
 echo "   agy-web attach   -> Canlı log ekranına bağlanır"
 echo "   agy-ci-watch     -> GitHub Actions CI/CD izleyici & otomatik onarım"
+echo "   agy-bridge       -> ChatGPT ↔ Supabase ↔ AGY relay yönetimi"
 echo ""
 echo "📱 Antigravity AI Android Uygulaması ile Bağlantı:"
 echo "   Android uygulamasında sol çekmeceden 'Termux Dosyaları'na"
