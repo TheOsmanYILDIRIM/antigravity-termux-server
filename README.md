@@ -203,3 +203,48 @@ commands, the `ls` and `usage` aliases, and the download-triage actions
 `dl-clean`, `dl-organize`, `dl-list`, and `dl-rollback`. Interactive or
 argument-dependent account mutations (login, add, switch, remove, import,
 export) remain CLI-only.
+
+
+---
+
+## 🤝 ChatGPT Agent Bridge
+
+Bu repo, mevcut AGY runtime'ını yeniden yazmadan ChatGPT'nin Termux'taki AGY CLI'yi uzun ömürlü bir subagent olarak kullanabilmesi için ayrı bir relay içerir.
+
+Akış:
+
+```text
+ChatGPT
+  -> dedicated Supabase project
+  -> bridge/relay.js
+  -> localhost:8080 /api/chat + /api/events
+  -> AGY CLI
+  -> AGY tools / subagents / tasks
+  -> agent_results
+```
+
+Avenox Brain Bridge ile tablo veya queue paylaşmaz. Ayrı Supabase projesi kullanılması önerilir.
+
+### Kurulum
+
+1. Ayrı Supabase projesinde `bridge/schema.sql` içeriğini uygulayın.
+2. `bridge/bridge.env.example` dosyasını şu konuma kopyalayın:
+
+```bash
+mkdir -p ~/.config/antigravity-bridge
+cp bridge/bridge.env.example ~/.config/antigravity-bridge/bridge.env
+chmod 600 ~/.config/antigravity-bridge/bridge.env
+```
+
+3. Dosyaya proje URL'sini ve yalnız Termux'ta tutulacak server-side secret/service-role key'i yazın.
+4. Mevcut AGY sunucusunu ve relay'i başlatın:
+
+```bash
+agy-web start
+agy-bridge start
+agy-bridge status
+```
+
+Relay tek bir `job_id`yi claim eder, lease/heartbeat yeniler, AGY'nin SSE sonucunu izler ve ancak nihai AGY sonucu geldikten sonra `agent_results` kaydını yazar. Relay yeniden başlarsa stale `claimed` job aynı ID ile kuyruğa döner; `running` job ise bilinen `conversation_id` üzerinden kurtarılmaya çalışılır. Bilinmeyen bir çalışan job körlemesine tekrar oynatılmaz.
+
+ChatGPT kaynaklı çağrılarda isteğe bağlı `requestId` alanı SSE eventlerine geri taşınır. Bu alan Android istemcisini etkilemez ve ortak `/api/events` kanalında event korelasyonu sağlar.
