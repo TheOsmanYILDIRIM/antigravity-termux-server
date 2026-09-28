@@ -3063,6 +3063,9 @@ const server = http.createServer(async (req, res) => {
     req.on("end", () => {
       try {
         const data = JSON.parse(body || "{}");
+        const requestId = typeof data.requestId === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(data.requestId)
+          ? data.requestId
+          : null;
         let prompt = (data.prompt || "").trim();
         const reqConvId = (data.conversationId || data.sessionId || "").trim();
         const isExplicitNew = data.continue === false || reqConvId.length === 0;
@@ -3208,12 +3211,13 @@ const server = http.createServer(async (req, res) => {
         let activeConvId = (isContinue ? conversationId : null) || currentSession.conversationId || currentSession.id || (Date.now().toString());
         broadcastSSE("generating_start", {
           conversationId: activeConvId,
-          isGenerating: true
+          isGenerating: true,
+          requestId
         });
 
         if (!res.headersSent) {
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ status: "accepted", prompt }));
+          res.end(JSON.stringify({ status: "accepted", prompt, requestId }));
         }
 
         class PersistentWorker {
@@ -3224,6 +3228,7 @@ const server = http.createServer(async (req, res) => {
             this.effort = opts.effort || "";
             this.mode = opts.mode || "";
             this.useVault = opts.useVault !== false;
+            this.currentRequestId = opts.requestId || null;
             this.child = null;
             this.isReady = false;
             this.isBusy = false;
@@ -3349,7 +3354,7 @@ const server = http.createServer(async (req, res) => {
                       activeProcesses.set(this.activeConvId, { child, botMessage: this.currentBotMessage, activeConvId: this.activeConvId });
                       currentSession.conversationId = eventObj.conversation_id;
                       currentSession.id = eventObj.conversation_id;
-                      broadcastSSE("init", { conversationId: eventObj.conversation_id });
+                      broadcastSSE("init", { conversationId: eventObj.conversation_id, requestId: this.currentRequestId });
                       broadcastSSE("generating_start", { conversationId: eventObj.conversation_id, isGenerating: true });
                     }
                     this.isReady = true;
@@ -3498,7 +3503,8 @@ const server = http.createServer(async (req, res) => {
                       broadcastSSE("done", {
                         exitCode: 0,
                         botMessage: this.currentBotMessage,
-                        conversationId: this.activeConvId
+                        conversationId: this.activeConvId,
+                        requestId: this.currentRequestId
                       });
                     }
 
@@ -3540,7 +3546,7 @@ const server = http.createServer(async (req, res) => {
                 this.currentBotMessage.state = "error";
                 this.currentBotMessage.content += "\n\n⚠️ *Hata: " + err.message + "*";
               }
-              broadcastSSE("error", { error: err.message, conversationId: this.activeConvId });
+              broadcastSSE("error", { error: err.message, conversationId: this.activeConvId, requestId: this.currentRequestId });
             });
 
             child.on("close", (code, signal) => {
@@ -3566,7 +3572,8 @@ const server = http.createServer(async (req, res) => {
             });
           }
 
-          sendTurn(promptText, botMsg) {
+          sendTurn(promptText, botMsg, requestId = null) {
+            this.currentRequestId = requestId || this.currentRequestId || null;
             this.currentBotMessage = botMsg;
             this.currentPrompt = promptText;
             this.isBusy = true;
@@ -3685,7 +3692,8 @@ const server = http.createServer(async (req, res) => {
               model: model,
               effort: effort,
               mode: mode,
-              useVault: useVault
+              useVault: useVault,
+              requestId: requestId
             });
             worker.start(1);
             if (targetId) persistentWorkers.set(targetId, worker);
@@ -3700,7 +3708,7 @@ const server = http.createServer(async (req, res) => {
             });
           }
 
-          worker.sendTurn(fullPromptForAgy, botMessage);
+          worker.sendTurn(fullPromptForAgy, botMessage, requestId);
         }
 
         handleChatExecution();
