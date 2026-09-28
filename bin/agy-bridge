@@ -1,0 +1,94 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -u
+
+SESSION_NAME="agy-bridge"
+SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}")"
+DIR="$(dirname "$(dirname "$SCRIPT_PATH")")"
+if [ ! -f "$DIR/bridge/relay.js" ]; then
+  DIR="/data/data/com.termux/files/home/antigravity-termux-server"
+fi
+
+ENV_FILE="${ANTIGRAVITY_BRIDGE_ENV:-$HOME/.config/antigravity-bridge/bridge.env}"
+LOG_FILE="${ANTIGRAVITY_BRIDGE_LOG:-$HOME/.cache/antigravity-bridge/relay.log}"
+
+ensure_env() {
+  if [ ! -f "$ENV_FILE" ]; then
+    echo "❌ Bridge env bulunamadı: $ENV_FILE"
+    echo "Örnek: $DIR/bridge/bridge.env.example"
+    return 1
+  fi
+  return 0
+}
+
+case "${1:-}" in
+  start)
+    if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+      echo "🟢 Antigravity ChatGPT Bridge zaten çalışıyor."
+      exit 0
+    fi
+    ensure_env || exit 1
+    mkdir -p "$(dirname "$LOG_FILE")"
+    chmod 600 "$ENV_FILE" 2>/dev/null || true
+    echo "🚀 Antigravity ChatGPT Bridge başlatılıyor..."
+    tmux new-session -d -s "$SESSION_NAME" -c "$DIR" \
+      "set -a; . '$ENV_FILE'; set +a; nice -n 15 taskset -c 0-5 node bridge/relay.js >> '$LOG_FILE' 2>&1"
+    sleep 1
+    if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+      echo "✅ Başlatıldı (tmux: $SESSION_NAME)"
+      echo "📝 Log: $LOG_FILE"
+    else
+      echo "❌ Başlatılamadı. Log: $LOG_FILE"
+      exit 1
+    fi
+    ;;
+
+  stop)
+    if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+      tmux kill-session -t "$SESSION_NAME"
+      echo "🛑 Antigravity ChatGPT Bridge durduruldu."
+    else
+      echo "ℹ️ Bridge çalışmıyor."
+    fi
+    ;;
+
+  restart)
+    "$0" stop
+    sleep 1
+    "$0" start
+    ;;
+
+  status)
+    if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+      echo "🟢 Durum: ÇALIŞIYOR"
+      tmux list-panes -t "$SESSION_NAME" -F 'PID: #{pane_pid} | #{pane_current_command}' 2>/dev/null || true
+      echo "📝 Log: $LOG_FILE"
+    else
+      echo "🔴 Durum: DURDURULDU"
+      exit 1
+    fi
+    ;;
+
+  attach)
+    if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+      tmux attach-session -t "$SESSION_NAME"
+    else
+      echo "❌ Bridge çalışmıyor. Önce: agy-bridge start"
+      exit 1
+    fi
+    ;;
+
+  logs)
+    touch "$LOG_FILE" 2>/dev/null || true
+    tail -n 100 -f "$LOG_FILE"
+    ;;
+
+  *)
+    echo "Antigravity ChatGPT Bridge"
+    echo "  agy-bridge start"
+    echo "  agy-bridge stop"
+    echo "  agy-bridge restart"
+    echo "  agy-bridge status"
+    echo "  agy-bridge attach"
+    echo "  agy-bridge logs"
+    ;;
+esac
