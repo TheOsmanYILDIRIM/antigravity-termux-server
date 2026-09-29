@@ -3327,7 +3327,7 @@ const server = http.createServer(async (req, res) => {
               exec("taskset -p -c 0-5 " + child.pid + " 2>/dev/null; renice 15 -p " + child.pid + " 2>/dev/null");
             }
 
-            child.stdout.on("data", (chunk) => {
+            child.stdout.on("data", async (chunk) => {
               const raw = chunk.toString("utf-8");
               try { fs.appendFileSync("/data/data/com.termux/files/home/agy_stdout.log", raw); } catch (e) {}
               this.buffer += raw;
@@ -3459,13 +3459,13 @@ const server = http.createServer(async (req, res) => {
                       }
 
                       if ((!this.currentBotMessage.content || this.currentBotMessage.content.trim().length === 0) && this.activeConvId) {
-                        loadBrainConversation(this.activeConvId).then(recovered => {
-                          if (!this.currentBotMessage || (this.currentBotMessage.content && this.currentBotMessage.content.trim().length > 0)) return;
+                        try {
+                          const recovered = await loadBrainConversation(this.activeConvId);
                           const recoveredBot = recovered && Array.isArray(recovered.messages)
                             ? [...recovered.messages].reverse().find(m => m && m.role === "bot" && typeof m.content === "string" && m.content.trim())
                             : null;
                           if (recoveredBot) this.currentBotMessage.content = recoveredBot.content;
-                        }).catch(() => {});
+                        } catch (e) {}
                       }
 
                       if (resObj && resObj.usage) {
