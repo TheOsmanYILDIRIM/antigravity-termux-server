@@ -29,5 +29,11 @@ jobs:
       - name: Check bridge relay syntax
         run: node --check bridge/relay.js
 
+      - name: Check shell scripts
+        run: |
+          bash -n bin/agy-web
+          bash -n bin/agy-update
+          bash -n install.sh
+
       - name: Validate action manifest example
         run: node -e "JSON.parse(require('fs').readFileSync('actions.json.example','utf8')); console.log('actions.json.example OK')"
