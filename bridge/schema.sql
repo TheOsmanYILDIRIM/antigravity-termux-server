@@ -228,11 +228,11 @@ create table if not exists private.bridge_client_keys (
 revoke all on schema private from public, anon, authenticated;
 revoke all on table private.bridge_client_keys from public, anon, authenticated;
 
-create or replace function public.bridge_check_request()
+create or replace function private.bridge_check_request()
 returns void
 language plpgsql
 security definer
-set search_path = public, private
+set search_path = private, public
 as $
 declare
   jwt_role text := coalesce(
@@ -267,10 +267,11 @@ begin
 end;
 $;
 
-revoke all on function public.bridge_check_request() from public, authenticated;
-grant execute on function public.bridge_check_request() to anon, service_role;
+revoke all on function private.bridge_check_request() from public, authenticated;
+grant usage on schema private to anon, service_role;
+grant execute on function private.bridge_check_request() to anon, service_role;
 
-alter role authenticator set pgrst.db_pre_request = 'public.bridge_check_request';
+alter role authenticator set pgrst.db_pre_request = 'private.bridge_check_request';
 
 grant select, update on table public.agent_jobs to anon;
 grant insert on table public.agent_events to anon;
