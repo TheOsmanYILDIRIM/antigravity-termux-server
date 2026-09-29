@@ -3437,10 +3437,49 @@ const server = http.createServer(async (req, res) => {
                     }
                   } else if (eventObj.event === "result") {
                     const resObj = eventObj.result;
-                    this.lastResultStatus = (resObj && resObj.status) ? String(resObj.status).toUpperCase() : null;
-                    this.lastResultError = (resObj && resObj.error) ? String(resObj.error) : null;
+                    const resultStatus = (resObj && resObj.status) ? String(resObj.status).toUpperCase() : null;
+                    const resultError = (resObj && resObj.error)
+                      ? (typeof resObj.error === "string" ? resObj.error : JSON.stringify(resObj.error))
+                      : null;
+                    const resultConversationId = (resObj && resObj.conversation_id)
+                      ? String(resObj.conversation_id)
+                      : null;
+
+                    this.lastResultStatus = resultStatus;
+                    this.lastResultError = resultError;
                     if (typeof (resObj && resObj.num_turns) === "number") {
                       this.numTurns = resObj.num_turns;
+                    }
+
+                    // The AGY terminal result is authoritative for its conversation id.
+                    // This also recovers the id when an init event was missed upstream.
+                    if (resultConversationId && resultConversationId !== this.activeConvId) {
+                      activeProcesses.delete(this.activeConvId);
+                      if (this.convId) persistentWorkers.delete(this.convId);
+                      this.convId = resultConversationId;
+                      this.activeConvId = resultConversationId;
+                      persistentWorkers.set(this.convId, this);
+                      activeProcesses.set(this.activeConvId, { child, botMessage: this.currentBotMessage, activeConvId: this.activeConvId });
+                      currentSession.conversationId = resultConversationId;
+                      currentSession.id = resultConversationId;
+                    }
+
+                    // A terminal AGY result is successful only when status is SUCCESS.
+                    // Never convert ERROR/WAITING/CANCELED/etc. into a synthetic done event.
+                    if (resultStatus && resultStatus !== "SUCCESS") {
+                      if (this.currentBotMessage) this.currentBotMessage.state = "error";
+                      broadcastSSE("error", {
+                        error: resultError || ("AGY result status " + resultStatus),
+                        agyStatus: resultStatus,
+                        conversationId: resultConversationId || this.activeConvId,
+                        requestId: this.currentRequestId
+                      });
+                      this.isBusy = false;
+                      currentSession.isGenerating = false;
+                      activeProcesses.delete(this.activeConvId);
+                      broadcastSSE("generating_done", { conversationId: this.activeConvId, isGenerating: false });
+                      this.resetIdleTimer();
+                      continue;
                     }
 
                     if (this.currentBotMessage) {
@@ -3530,8 +3569,9 @@ const server = http.createServer(async (req, res) => {
                       this.currentBotMessage.state = "done";
                       broadcastSSE("done", {
                         exitCode: 0,
+                        agyStatus: resultStatus || "SUCCESS",
                         botMessage: this.currentBotMessage,
-                        conversationId: this.activeConvId,
+                        conversationId: resultConversationId || this.activeConvId,
                         requestId: this.currentRequestId
                       });
                     }
@@ -3611,13 +3651,21 @@ const server = http.createServer(async (req, res) => {
             if (this.idleTimer) clearTimeout(this.idleTimer);
             activeProcesses.set(this.activeConvId, { child: this.child, botMessage: botMsg, activeConvId: this.activeConvId });
 
-            // AGY stream-json input is driver-led: the first user event must be
-            // written to stdin without waiting for an init event.
-            if (!this.child || this.child.exitCode !== null || !this.child.stdin || this.child.stdin.destroyed) {
-              this.start(1);
-            }
-            if (this.child && this.child.exitCode === null && this.child.stdin && !this.child.stdin.destroyed) {
-              this.writePayload(promptText);
+            const doSend = () => {
+              if (!this.child || this.child.exitCode !== null || !this.child.stdin || this.child.stdin.destroyed) {
+                this.start(1);
+                this.initWaiters.push(() => {
+                  this.writePayload(promptText);
+                });
+              } else {
+                this.writePayload(promptText);
+              }
+            };
+
+            if (!this.isReady) {
+              this.initWaiters.push(doSend);
+            } else {
+              doSend();
             }
           }
 
