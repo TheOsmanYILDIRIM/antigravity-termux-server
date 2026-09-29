@@ -1,0 +1,149 @@
+{
+  "actions": [
+    {
+      "id": "agy-auth-list",
+      "label": "AGY hesaplarını listele",
+      "compactLabel": "Hesaplar",
+      "category": "AGY Auth",
+      "icon": "list",
+      "order": 10,
+      "executable": "/data/data/com.termux/files/usr/bin/agy-auth",
+      "args": [
+        "list"
+      ]
+    },
+    {
+      "id": "agy-auth-ls",
+      "label": "AGY hesaplarını listele (ls)",
+      "compactLabel": "Hesaplar (ls)",
+      "category": "AGY Auth",
+      "icon": "list",
+      "order": 15,
+      "executable": "/data/data/com.termux/files/usr/bin/agy-auth",
+      "args": [
+        "ls"
+      ]
+    },
+    {
+      "id": "agy-auth-current",
+      "label": "Aktif AGY hesabını göster",
+      "compactLabel": "Aktif hesap",
+      "category": "AGY Auth",
+      "icon": "account_circle",
+      "order": 20,
+      "executable": "/data/data/com.termux/files/usr/bin/agy-auth",
+      "args": [
+        "current"
+      ]
+    },
+    {
+      "id": "agy-auth-status",
+      "label": "AGY auth durumunu göster",
+      "compactLabel": "Durum",
+      "category": "AGY Auth",
+      "icon": "info",
+      "order": 30,
+      "executable": "/data/data/com.termux/files/usr/bin/agy-auth",
+      "args": [
+        "status"
+      ]
+    },
+    {
+      "id": "agy-auth-quota",
+      "label": "AGY kotasını göster",
+      "compactLabel": "Kota",
+      "category": "AGY Auth",
+      "icon": "data_usage",
+      "order": 40,
+      "executable": "/data/data/com.termux/files/usr/bin/agy-auth",
+      "args": [
+        "quota"
+      ]
+    },
+    {
+      "id": "agy-auth-usage",
+      "label": "AGY kotasını göster (usage)",
+      "compactLabel": "Kota (usage)",
+      "category": "AGY Auth",
+      "icon": "data_usage",
+      "order": 45,
+      "executable": "/data/data/com.termux/files/usr/bin/agy-auth",
+      "args": [
+        "usage"
+      ]
+    },
+    {
+      "id": "agy-auth-history",
+      "label": "AGY kota geçmişini göster",
+      "compactLabel": "Geçmiş",
+      "category": "AGY Auth",
+      "icon": "history",
+      "order": 50,
+      "executable": "/data/data/com.termux/files/usr/bin/agy-auth",
+      "args": [
+        "history"
+      ]
+    },
+    {
+      "id": "agy-auth-sync",
+      "label": "AGY kotalarını senkronize et",
+      "compactLabel": "Sync",
+      "category": "AGY Auth",
+      "icon": "sync",
+      "order": 60,
+      "executable": "/data/data/com.termux/files/usr/bin/agy-auth",
+      "args": [
+        "sync"
+      ]
+    },
+    {
+      "id": "agy-auth-doctor",
+      "label": "AGY auth sağlık kontrolü",
+      "compactLabel": "Doctor",
+      "category": "AGY Auth",
+      "icon": "health_and_safety",
+      "order": 70,
+      "executable": "/data/data/com.termux/files/usr/bin/agy-auth",
+      "args": [
+        "doctor"
+      ]
+    },
+    {
+      "id": "agy-auth-ps",
+      "label": "AGY süreçlerini listele",
+      "compactLabel": "Süreçler",
+      "category": "AGY Auth",
+      "icon": "memory",
+      "order": 80,
+      "executable": "/data/data/com.termux/files/usr/bin/agy-auth",
+      "args": [
+        "ps"
+      ]
+    },
+    {
+      "id": "agy-auth-refresh",
+      "label": "AGY tokenlarını yenile",
+      "compactLabel": "Yenile",
+      "category": "AGY Auth",
+      "icon": "refresh",
+      "order": 90,
+      "executable": "/data/data/com.termux/files/usr/bin/agy-auth",
+      "args": [
+        "refresh"
+      ]
+    },
+    {
+      "id": "agy-auth-auto-dry-run",
+      "label": "AGY otomatik geçişini simüle et",
+      "compactLabel": "Auto test",
+      "category": "AGY Auth",
+      "icon": "autorenew",
+      "order": 100,
+      "executable": "/data/data/com.termux/files/usr/bin/agy-auth",
+      "args": [
+        "auto",
+        "--dry-run"
+      ]
+    }
+  ]
+}
