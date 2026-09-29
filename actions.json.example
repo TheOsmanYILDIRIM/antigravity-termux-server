@@ -2,6 +2,7 @@
   "enabled": [
     "agy-start",
     "agy-stop",
+    "system-update",
     "vault-sync",
     "codex-start",
     "codex-stop",
