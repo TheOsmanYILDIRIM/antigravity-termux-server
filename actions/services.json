@@ -11,7 +11,8 @@
       "args": [
         "/data/data/com.termux/files/home/antigravity-termux-server/bin/codex-web",
         "start"
-      ]
+      ],
+      "schedulable": true
     },
     {
       "id": "codex-stop",
@@ -37,7 +38,8 @@
       "args": [
         "/data/data/com.termux/files/home/antigravity-termux-server/bin/opencode-web",
         "start"
-      ]
+      ],
+      "schedulable": true
     },
     {
       "id": "opencode-stop",
@@ -63,7 +65,8 @@
       "args": [
         "/data/data/com.termux/files/home/antigravity-termux-server/bin/cline-web",
         "start"
-      ]
+      ],
+      "schedulable": true
     },
     {
       "id": "cline-stop",
