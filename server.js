@@ -3459,13 +3459,21 @@ const server = http.createServer(async (req, res) => {
                       }
 
                       if ((!this.currentBotMessage.content || this.currentBotMessage.content.trim().length === 0) && this.activeConvId) {
-                        try {
-                          const recovered = await loadBrainConversation(this.activeConvId);
-                          const recoveredBot = recovered && Array.isArray(recovered.messages)
-                            ? [...recovered.messages].reverse().find(m => m && m.role === "bot" && typeof m.content === "string" && m.content.trim())
-                            : null;
-                          if (recoveredBot) this.currentBotMessage.content = recoveredBot.content;
-                        } catch (e) {}
+                        for (let recoverAttempt = 0; recoverAttempt < 5; recoverAttempt++) {
+                          try {
+                            const recovered = await loadBrainConversation(this.activeConvId);
+                            const recoveredBot = recovered && Array.isArray(recovered.messages)
+                              ? [...recovered.messages].reverse().find(m => m && m.role === "bot" && typeof m.content === "string" && m.content.trim())
+                              : null;
+                            if (recoveredBot) {
+                              this.currentBotMessage.content = recoveredBot.content;
+                              break;
+                            }
+                          } catch (e) {}
+                          if (recoverAttempt < 4) {
+                            await new Promise(resolve => setTimeout(resolve, 150 * (recoverAttempt + 1)));
+                          }
+                        }
                       }
 
                       if (resObj && resObj.usage) {
