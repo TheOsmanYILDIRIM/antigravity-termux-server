@@ -1,0 +1,11 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -u
+REPO_DIR="${ANTIGRAVITY_SERVER_DIR:-/data/data/com.termux/files/home/antigravity-termux-server}"
+ACTION_ID="${1:-}"
+
+if [ -z "$ACTION_ID" ]; then
+  echo "Kullanım: agy-action-run <action-id>" >&2
+  exit 2
+fi
+
+exec node "$REPO_DIR/scripts/run-action.js" "$ACTION_ID"
