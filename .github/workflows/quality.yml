@@ -24,7 +24,10 @@ jobs:
           node-version: "22"
 
       - name: Check server syntax
-        run: node --check server.js
+        run: |
+          node --check server.js
+          node --check lib/actions.js
+          node --check scripts/run-action.js
 
       - name: Check bridge relay syntax
         run: node --check bridge/relay.js
@@ -33,6 +36,7 @@ jobs:
         run: |
           bash -n bin/agy-web
           bash -n bin/agy-update
+          bash -n bin/agy-action-run
           bash -n install.sh
 
       - name: Validate external action catalog
