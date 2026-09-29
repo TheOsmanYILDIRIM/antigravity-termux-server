@@ -1,0 +1,16 @@
+{
+  "actions": [
+    {
+      "id": "system-update",
+      "label": "Antigravity sunucusunu güncelle",
+      "compactLabel": "Sunucuyu Güncelle",
+      "category": "Güncellemeler",
+      "icon": "system_update",
+      "order": 10,
+      "executable": "/data/data/com.termux/files/usr/bin/bash",
+      "args": [
+        "/data/data/com.termux/files/home/antigravity-termux-server/bin/agy-update"
+      ]
+    }
+  ]
+}
