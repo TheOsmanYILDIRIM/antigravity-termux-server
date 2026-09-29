@@ -3008,10 +3008,15 @@ const server = http.createServer(async (req, res) => {
 
   // Status
   if (pathname === "/api/status" && req.method === "GET") {
+    const maxCapacity = 5;
+    const activeCount = activeProcesses.size;
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({
       status: "ok",
       busy: currentSession.isGenerating,
+      activeCount: activeCount,
+      maxCapacity: maxCapacity,
+      availableCapacity: Math.max(0, maxCapacity - activeCount),
       sessionId: currentSession.id,
       conversationId: currentSession.conversationId,
       messagesCount: currentSession.messages.length,
@@ -3153,18 +3158,24 @@ const server = http.createServer(async (req, res) => {
           compactConversationTranscript(conversationId, threshold, false);
         }
 
-        if (!continueChat) {
-          currentSession = {
-            id: null,
-            conversationId: null,
-            title: prompt.length > 35 ? prompt.slice(0, 35) + "…" : (prompt || "Yeni Sohbet"),
-            messages: [],
-            isGenerating: false,
-            createdAt: new Date().toISOString()
-          };
-        } else {
-          currentSession.conversationId = conversationId;
-          currentSession.id = conversationId;
+        const clientType = (data.client || "antigravity-android").trim();
+        const isBridgeClient = clientType === "chatgpt-bridge" || Boolean(requestId);
+        const isMobileClient = !isBridgeClient && (clientType.includes("android") || clientType.includes("mobile") || clientType === "antigravity-android");
+
+        if (!isBridgeClient) {
+          if (!continueChat) {
+            currentSession = {
+              id: null,
+              conversationId: null,
+              title: prompt.length > 35 ? prompt.slice(0, 35) + "…" : (prompt || "Yeni Sohbet"),
+              messages: [],
+              isGenerating: false,
+              createdAt: new Date().toISOString()
+            };
+          } else {
+            currentSession.conversationId = conversationId;
+            currentSession.id = conversationId;
+          }
         }
         const model = (data.model || "").trim();
         const effort = (data.effort || "").trim();
@@ -3218,9 +3229,6 @@ const server = http.createServer(async (req, res) => {
           }
         }
 
-        const clientType = (data.client || "antigravity-android").trim();
-        const isMobileClient = clientType.includes("android") || clientType.includes("mobile") || clientType === "antigravity-android";
-
         let clientContextInstruction = "";
         if (isMobileClient) {
           clientContextInstruction = `[Ortam Bilgisi & İstemci: Antigravity Android Mobil Uygulaması]
@@ -3241,38 +3249,52 @@ const server = http.createServer(async (req, res) => {
         const fullPromptForAgy = (clientContextInstruction + prompt + attachmentNotice).trim();
 
         const isContinue = continueChat && Boolean(conversationId);
-        if (!isContinue) {
-          currentSession = {
-            id: null,
-            conversationId: null,
-            title: prompt.length > 35 ? prompt.slice(0, 35) + "…" : (prompt || "Yeni Sohbet"),
-            messages: [],
-            isGenerating: true
+        let botMessage = null;
+
+        if (!isBridgeClient) {
+          if (!isContinue) {
+            currentSession = {
+              id: null,
+              conversationId: null,
+              title: prompt.length > 35 ? prompt.slice(0, 35) + "…" : (prompt || "Yeni Sohbet"),
+              messages: [],
+              isGenerating: true,
+              createdAt: new Date().toISOString()
+            };
+          } else if (currentSession.messages.length === 0) {
+            currentSession.title = prompt.length > 35 ? prompt.slice(0, 35) + "…" : (prompt || "Ekli Dosya Analizi");
+          }
+
+          currentSession.messages.push({
+            role: "user",
+            content: prompt || "(Dosya/Görsel Eklendi)",
+            attachments: attachments,
+            time: new Date().toISOString()
+          });
+
+          botMessage = {
+            role: "bot",
+            content: "",
+            tools: [],
+            usage: null,
+            time: new Date().toISOString(),
+            state: "generating"
           };
-        } else if (currentSession.messages.length === 0) {
-          currentSession.title = prompt.length > 35 ? prompt.slice(0, 35) + "…" : (prompt || "Ekli Dosya Analizi");
+          currentSession.messages.push(botMessage);
+          currentSession.isGenerating = true;
+        } else {
+          botMessage = {
+            role: "bot",
+            content: "",
+            tools: [],
+            usage: null,
+            time: new Date().toISOString(),
+            state: "generating"
+          };
         }
-
-        currentSession.messages.push({
-          role: "user",
-          content: prompt || "(Dosya/Görsel Eklendi)",
-          attachments: attachments,
-          time: new Date().toISOString()
-        });
-
-        const botMessage = {
-          role: "bot",
-          content: "",
-          tools: [],
-          usage: null,
-          time: new Date().toISOString(),
-          state: "generating"
-        };
-        currentSession.messages.push(botMessage);
-        currentSession.isGenerating = true;
         manualStop = false;
 
-        let activeConvId = (isContinue ? conversationId : null) || currentSession.conversationId || currentSession.id || (Date.now().toString());
+        let activeConvId = (isContinue ? conversationId : null) || (isBridgeClient ? null : (currentSession.conversationId || currentSession.id)) || (Date.now().toString());
         broadcastSSE("generating_start", {
           conversationId: activeConvId,
           isGenerating: true,
@@ -3293,6 +3315,7 @@ const server = http.createServer(async (req, res) => {
             this.mode = opts.mode || "";
             this.useVault = opts.useVault !== false;
             this.currentRequestId = opts.requestId || null;
+            this.isBridge = Boolean(opts.isBridge);
             this.child = null;
             this.isReady = false;
             this.isBusy = false;
@@ -3417,8 +3440,10 @@ const server = http.createServer(async (req, res) => {
                       this.activeConvId = eventObj.conversation_id;
                       persistentWorkers.set(this.convId, this);
                       activeProcesses.set(this.activeConvId, { child, botMessage: this.currentBotMessage, activeConvId: this.activeConvId });
-                      currentSession.conversationId = eventObj.conversation_id;
-                      currentSession.id = eventObj.conversation_id;
+                      if (!this.isBridge) {
+                        currentSession.conversationId = eventObj.conversation_id;
+                        currentSession.id = eventObj.conversation_id;
+                      }
                       upsertActiveConversationCache(this.activeConvId);
                       if (previousActiveConvId && previousActiveConvId !== this.activeConvId) {
                         broadcastSSE("conversation_rebound", {
@@ -3445,7 +3470,8 @@ const server = http.createServer(async (req, res) => {
                       broadcastSSE("chunk", {
                         text_delta: update.text_delta,
                         full_content: this.currentBotMessage.content,
-                        conversationId: this.activeConvId
+                        conversationId: this.activeConvId,
+                        requestId: this.currentRequestId
                       });
                     }
 
@@ -3480,7 +3506,8 @@ const server = http.createServer(async (req, res) => {
 
                       broadcastSSE("tool_update", {
                         tool: toolData,
-                        conversationId: this.activeConvId
+                        conversationId: this.activeConvId,
+                        requestId: this.currentRequestId
                       });
 
                       if (toolName.includes("subagent")) {
@@ -3488,7 +3515,8 @@ const server = http.createServer(async (req, res) => {
                           if (subs.length > 0) {
                             broadcastSSE("subagents_update", {
                               conversationId: this.activeConvId,
-                              subagents: subs
+                              subagents: subs,
+                              requestId: this.currentRequestId
                             });
                           }
                         }).catch(() => {});
@@ -3498,7 +3526,8 @@ const server = http.createServer(async (req, res) => {
                           if (tsks.length > 0) {
                             broadcastSSE("tasks_update", {
                               conversationId: this.activeConvId,
-                              tasks: tsks
+                              tasks: tsks,
+                              requestId: this.currentRequestId
                             });
                           }
                         }).catch(() => {});
@@ -3548,8 +3577,10 @@ const server = http.createServer(async (req, res) => {
                       this.activeConvId = resultConversationId;
                       persistentWorkers.set(this.convId, this);
                       activeProcesses.set(this.activeConvId, { child, botMessage: this.currentBotMessage, activeConvId: this.activeConvId });
-                      currentSession.conversationId = resultConversationId;
-                      currentSession.id = resultConversationId;
+                      if (!this.isBridge) {
+                        currentSession.conversationId = resultConversationId;
+                        currentSession.id = resultConversationId;
+                      }
                       upsertActiveConversationCache(this.activeConvId);
                       broadcastSSE("conversation_rebound", {
                         fromConversationId: previousActiveConvId,
@@ -3571,7 +3602,9 @@ const server = http.createServer(async (req, res) => {
                         requestId: this.currentRequestId
                       });
                       this.isBusy = false;
-                      currentSession.isGenerating = false;
+                      if (!this.isBridge) {
+                        currentSession.isGenerating = false;
+                      }
                       activeProcesses.delete(this.activeConvId);
                       broadcastSSE("generating_done", { conversationId: this.activeConvId, isGenerating: false, requestId: this.currentRequestId });
                       this.resetIdleTimer();
@@ -3612,7 +3645,7 @@ const server = http.createServer(async (req, res) => {
                       }
 
                       if (resObj && resObj.usage) {
-                        const activeContextTokens = calculateSessionContextTokens(currentSession);
+                        const activeContextTokens = this.isBridge ? 0 : calculateSessionContextTokens(currentSession);
                         const turnTokens = calculateTurnTokens(this.currentPrompt, this.currentBotMessage);
                         this.currentBotMessage.usage = {
                           input_tokens: resObj.usage.input_tokens > 0 ? resObj.usage.input_tokens : Math.max(1, Math.round((this.currentPrompt || "").length / 3.6)),
@@ -3627,7 +3660,7 @@ const server = http.createServer(async (req, res) => {
                       }
 
                       // Title & project tag update
-                      if (this.activeConvId && this.currentBotMessage.content) {
+                      if (!this.isBridge && this.activeConvId && this.currentBotMessage.content) {
                         const m = this.currentBotMessage.content.match(/<!--__AGY_SESSION_TITLE:\s*([^\n\r]+?)\s*__-->/) ||
                                   this.currentBotMessage.content.match(/<!--SESSION_TITLE:\s*([^\n\r]+?)\s*-->/);
                         if (m && m[1]) {
@@ -3673,7 +3706,9 @@ const server = http.createServer(async (req, res) => {
                     }
 
                     this.isBusy = false;
-                    currentSession.isGenerating = false;
+                    if (!this.isBridge) {
+                      currentSession.isGenerating = false;
+                    }
                     activeProcesses.delete(this.activeConvId);
                     broadcastSSE("generating_done", { conversationId: this.activeConvId, isGenerating: false, requestId: this.currentRequestId });
                     this.resetIdleTimer();
@@ -3699,12 +3734,14 @@ const server = http.createServer(async (req, res) => {
                 });
               }
 
-              broadcastSSE("stderr", { text: stderrText, conversationId: this.activeConvId });
+              broadcastSSE("stderr", { text: stderrText, conversationId: this.activeConvId, requestId: this.currentRequestId });
             });
 
             child.on("error", (err) => {
               this.cleanup();
-              currentSession.isGenerating = false;
+              if (!this.isBridge) {
+                currentSession.isGenerating = false;
+              }
               broadcastSSE("generating_done", { conversationId: this.activeConvId, isGenerating: false, requestId: this.currentRequestId });
               if (this.currentBotMessage) {
                 this.currentBotMessage.state = "error";
@@ -3719,18 +3756,22 @@ const server = http.createServer(async (req, res) => {
 
               if (manualStop) {
                 manualStop = false;
-                currentSession.isGenerating = false;
+                if (!this.isBridge) {
+                  currentSession.isGenerating = false;
+                }
                 broadcastSSE("generating_done", { conversationId: this.activeConvId, isGenerating: false, requestId: this.currentRequestId });
                 return;
               }
 
               if (wasBusy) {
-                currentSession.isGenerating = false;
+                if (!this.isBridge) {
+                  currentSession.isGenerating = false;
+                }
                 broadcastSSE("generating_done", { conversationId: this.activeConvId, isGenerating: false, requestId: this.currentRequestId });
                 if (this.currentBotMessage && (!this.currentBotMessage.content || this.currentBotMessage.content.trim().length === 0)) {
                   this.currentBotMessage.state = "error";
                   this.currentBotMessage.content = "⚠️ *Üretim süreci sonlandı (exit " + code + ").*";
-                  broadcastSSE("error", { error: this.lastResultError || "Process exited unexpectedly", conversationId: this.activeConvId });
+                  broadcastSSE("error", { error: this.lastResultError || "Process exited unexpectedly", conversationId: this.activeConvId, requestId: this.currentRequestId });
                 }
               }
             });
@@ -3776,7 +3817,9 @@ const server = http.createServer(async (req, res) => {
                 this.currentBotMessage.state = "error";
               }
               this.cleanup();
-              currentSession.isGenerating = false;
+              if (!this.isBridge) {
+                currentSession.isGenerating = false;
+              }
               broadcastSSE("error", {
                 error: "AGY stdin write failed: " + (e && e.message ? e.message : String(e)),
                 conversationId: failedConvId,
@@ -3826,7 +3869,7 @@ const server = http.createServer(async (req, res) => {
         function handleChatExecution() {
           // Actions are explicit user-invoked shell shortcuts. Never run agy-auth
           // or any other Action implicitly in the chat message critical path.
-          const targetId = conversationId || currentSession.conversationId;
+          const targetId = conversationId || (isBridgeClient ? null : currentSession.conversationId);
           let worker = targetId ? persistentWorkers.get(targetId) : null;
 
           // If worker exists but config changed (model/effort/mode), destroy and re-create.
@@ -3842,7 +3885,8 @@ const server = http.createServer(async (req, res) => {
               effort: effort,
               mode: mode,
               useVault: useVault,
-              requestId: requestId
+              requestId: requestId,
+              isBridge: isBridgeClient
             });
             worker.start(1);
             if (targetId) persistentWorkers.set(targetId, worker);

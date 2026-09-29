@@ -161,6 +161,21 @@ To continue the same AGY conversation, create a new logical job whose request in
 
 A continuation is a new user turn, therefore a new job ID is expected. It must not be confused with retrying the same logical job.
 
+## Bounded Parallel Job Concurrency
+
+The bridge supports bounded top-level parallel job execution:
+
+- **Configurable concurrency:** `ANTIGRAVITY_BRIDGE_CONCURRENCY` (default `3`, bounded between 1 and 10) in `bridge/relay.js`.
+- **Worker pool:** A single relay process manages an in-process pool of worker slots claiming jobs with PostgreSQL `FOR UPDATE SKIP LOCKED`.
+- **Multiplexed SSE:** The relay uses a single multiplexed SSE hub correlating events by `requestId` (job ID) and `conversationId`, preventing cross-talk between concurrent jobs.
+- **Server isolation:** Bridge jobs specify `client: "chatgpt-bridge"` and `requestId`, isolating them from the Android GUI `currentSession`.
+- **Top-level parallel jobs vs internal subagents:**
+  - *Top-level parallel jobs:* Distinct independent tasks enqueued by ChatGPT into `agent_jobs`. Each has its own job ID, claim token, heartbeat, and result row.
+  - *Internal AGY subagents:* A single parent AGY job internally spawning subagents via `invoke_subagent`. The parent job waits for its subagents and yields a single consolidated response.
+- **Safety boundaries for ChatGPT delegation:**
+  - *Safe parallel jobs:* Read-only tasks, independent repositories, or disjoint directory work.
+  - *Sequential requirement:* If multiple tasks write to the same repo, files, or git branch, ChatGPT must sequence them (or continue in the same conversation) to prevent race conditions or merge conflicts.
+
 ## Security boundary
 
 Termux uses:

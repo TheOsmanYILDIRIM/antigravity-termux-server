@@ -608,9 +608,18 @@ For CPU-heavy work on Termux, preserve the repository's thermal conventions wher
 
 ---
 
-## 12. When to use AGY subagents
+## 12. Top-Level Parallel Jobs vs Internal AGY Subagents
 
-AGY itself may use subagents when the delegated task naturally decomposes into independent workstreams, for example:
+The bridge supports two levels of concurrency:
+
+### 12.1 Top-Level Parallel Jobs (ChatGPT → Bridge)
+ChatGPT can enqueue multiple independent top-level AGY jobs simultaneously. The Termux relay processes up to `ANTIGRAVITY_BRIDGE_CONCURRENCY` (default 3) jobs in parallel.
+- Each job maintains a distinct `job_id`, atomic lease/claim token, independent heartbeat, and result row.
+- Safe parallel use cases: Independent read-only searches, multi-repo investigations, or disjoint tasks.
+- **Strict safety rule:** Do NOT execute parallel top-level jobs that write to or edit the same directory, files, or git branch simultaneously. When jobs share mutable state, sequence them sequentially or continue within the same conversation.
+
+### 12.2 Internal AGY Subagents (AGY → AGY)
+AGY itself may spawn child subagents (`invoke_subagent`) when a single delegated task naturally decomposes into independent workstreams, for example:
 
 - inspect two independent repositories;
 - compare implementation vs tests;
