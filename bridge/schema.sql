@@ -212,5 +212,84 @@ grant execute on function public.complete_agent_job(uuid,text,uuid,text,text,jso
 grant execute on function public.fail_agent_job(uuid,text,uuid,jsonb) to service_role;
 grant execute on function public.requeue_stale_claimed_agent_job(uuid,text,uuid) to service_role;
 
+
+-- Device-scoped bridge authentication. The raw client secret never needs to leave Termux.
+create schema if not exists private;
+
+create table if not exists private.bridge_client_keys (
+  key_id text primary key,
+  secret_sha256 text not null check (secret_sha256 ~ '^[0-9a-f]{64}
+),
+  enabled boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+revoke all on schema private from public, anon, authenticated;
+revoke all on table private.bridge_client_keys from public, anon, authenticated;
+
+create or replace function public.bridge_check_request()
+returns void
+language plpgsql
+security definer
+set search_path = public, private
+as $
+declare
+  jwt_role text := coalesce(
+    current_setting('request.jwt.claims', true)::jsonb->>'role',
+    current_setting('request.jwt', true)::jsonb->>'role'
+  );
+  supplied text := current_setting('request.headers', true)::jsonb->>'x-antigravity-bridge-key';
+  supplied_hash text;
+  ok boolean;
+begin
+  if jwt_role = 'service_role' then return; end if;
+  if jwt_role <> 'anon' then
+    raise sqlstate 'PGRST' using
+      message = '{"message":"Forbidden"}',
+      detail = '{"status":403,"status_text":"Forbidden"}';
+  end if;
+  if supplied is null or length(supplied) < 32 then
+    raise sqlstate 'PGRST' using
+      message = '{"message":"Missing bridge key"}',
+      detail = '{"status":403,"status_text":"Forbidden"}';
+  end if;
+  supplied_hash := encode(digest(supplied, 'sha256'), 'hex');
+  select exists(
+    select 1 from private.bridge_client_keys
+    where enabled = true and secret_sha256 = supplied_hash
+  ) into ok;
+  if not ok then
+    raise sqlstate 'PGRST' using
+      message = '{"message":"Invalid bridge key"}',
+      detail = '{"status":403,"status_text":"Forbidden"}';
+  end if;
+end;
+$;
+
+revoke all on function public.bridge_check_request() from public, authenticated;
+grant execute on function public.bridge_check_request() to anon, service_role;
+
+alter role authenticator set pgrst.db_pre_request = 'public.bridge_check_request';
+
+grant select, update on table public.agent_jobs to anon;
+grant insert on table public.agent_events to anon;
+grant select on table public.agent_results to anon;
+grant usage, select on sequence public.agent_events_id_seq to anon;
+
+create policy bridge_anon_jobs_select on public.agent_jobs for select to anon using (true);
+create policy bridge_anon_jobs_update on public.agent_jobs for update to anon using (true) with check (true);
+create policy bridge_anon_events_insert on public.agent_events for insert to anon with check (true);
+create policy bridge_anon_results_select on public.agent_results for select to anon using (true);
+
+grant execute on function public.claim_agent_job(text,integer) to anon;
+grant execute on function public.heartbeat_agent_job(uuid,text,uuid,integer) to anon;
+grant execute on function public.mark_agent_job_running(uuid,text,uuid,text,integer) to anon;
+grant execute on function public.bind_agent_job_conversation(uuid,text,uuid,text) to anon;
+grant execute on function public.complete_agent_job(uuid,text,uuid,text,text,jsonb,jsonb,jsonb) to anon;
+grant execute on function public.fail_agent_job(uuid,text,uuid,jsonb) to anon;
+grant execute on function public.requeue_stale_claimed_agent_job(uuid,text,uuid) to anon;
+
 commit;
+notify pgrst,'reload config';
 notify pgrst,'reload schema';
