@@ -312,12 +312,13 @@ Continuation is a new logical job and therefore gets a new `job_id`.
 
 Do not confuse continuation with retrying the same bridge job.
 
-### Mode H — Recovery
+### Mode H — Recovery & Interruption Handling
 
 For an existing `claimed` or `running` job:
 
 - follow the same `job_id`;
-- never create a replacement just because polling has not finished;
+- never create a replacement just because polling/waiting has timed out;
+- if the user interrupts after a delegated job may have completed, first do a zero-time/snapshot wait call (`private.wait_agent_job(job_id, p_timeout_seconds => 0)`) for the existing job before creating any new job;
 - use the bound `conversation_id` for running-job recovery;
 - never blindly replay a running prompt with no durable conversation ID.
 
@@ -488,7 +489,35 @@ For binary/generated artifacts, return metadata or checksums unless content is s
 
 ---
 
-## 9. Result and success contract
+## 9. Waiting, results, and success contract
+
+### 9.1 Bounded in-database waiting (`private.wait_agent_job`)
+
+Do not perform repeated high-frequency `SELECT` polling loops on `agent_jobs` or `agent_events`.
+
+**Rationale:** Manual polling creates needless tool calls and race windows between completion and the next ChatGPT poll; database-side bounded waiting closes that gap.
+
+After enqueueing a job, ChatGPT calls:
+
+```sql
+select private.wait_agent_job(
+  p_job_id => '<job-id>'::uuid,
+  p_timeout_seconds => 20, -- 20-30s bounded wait
+  p_poll_interval_ms => 500
+);
+```
+
+#### Operational rules:
+- **Prefer bounded wait:** After enqueue, prefer `private.wait_agent_job(job_id, 20-30s, 500ms)` rather than repeated `SELECT` status/event polling.
+- **Timeout handling:** If it returns `timed_out = true`, call the SAME wait primitive again for the SAME job ID. Do not create a replacement job.
+- **Terminal success:** If `terminal = true` and `ready = true`, consume `response_text` immediately.
+- **Protocol error handling:** If terminal completed (`terminal = true`) but `ready = false`, treat as a bridge protocol error; inspect `agent_jobs` + `agent_results` once to diagnose.
+- **Debug-only events:** Read `agent_events` ONLY for debugging (failed job, stale heartbeat, repeated timeout, protocol mismatch), NOT for normal waiting.
+- **Interruption snapshot:** If the user interrupts after a delegated job may have completed, first do a zero-time/snapshot wait call (`p_timeout_seconds => 0`) for the existing job before creating any new job.
+- **Continuation:** Preserve `conversation_id` for continuation.
+- **Job cardinality:** One logical task = one job ID.
+
+### 9.2 Success contract
 
 A diagnostic SSE `done` event is not sufficient.
 
@@ -501,6 +530,8 @@ AND agent_results.response_text is non-empty
 AND conversation_id is durable when AGY assigned one
 AND agent_jobs.error is null
 ```
+
+(This is precisely what `ready = true` asserts in `private.wait_agent_job`.)
 
 For exact-output tests, also verify `response_text` matches the expected AGY final answer.
 

@@ -106,11 +106,33 @@ A `done` event in `agent_events` is diagnostic evidence, not by itself proof tha
 - ChatGPT must follow the original job ID until terminal state.
 - Never start a second job merely because a poll returned `claimed` or `running`.
 
-## ChatGPT read pattern
+## ChatGPT wait and read pattern
 
-For an active job, read only that job ID and its matching result.
+### Bounded in-database waiting (`private.wait_agent_job`)
 
-Recommended status query shape:
+To eliminate high-frequency polling loops and race windows between job completion and subsequent polls, ChatGPT must use the database-side bounded waiting function after enqueue:
+
+```sql
+select private.wait_agent_job(
+  p_job_id => '<job-id>'::uuid,
+  p_timeout_seconds => 20, -- 20-30s bounded wait
+  p_poll_interval_ms => 500
+);
+```
+
+**Rationale:** Manual high-frequency polling creates needless tool calls and race windows between worker completion and the next ChatGPT poll; database-side bounded waiting closes that gap by holding the connection until terminal state or deadline.
+
+### Operational rules:
+- **Prefer bounded wait:** After enqueue, prefer `private.wait_agent_job(job_id, 20-30s, 500ms)` rather than repeated `SELECT` status/event polling.
+- **Timeout handling:** If it returns `timed_out = true`, call the SAME wait primitive again for the SAME job ID. Do not create a replacement job.
+- **Terminal success:** If `terminal = true` and `ready = true`, consume `response_text` immediately.
+- **Protocol error handling:** If terminal completed (`terminal = true`) but `ready = false`, treat as a bridge protocol error; inspect `agent_jobs` + `agent_results` once to diagnose.
+- **Event reading for debugging only:** Read `agent_events` ONLY for debugging (failed job, stale heartbeat, repeated timeout, protocol mismatch), NOT for normal waiting.
+- **Interruption snapshot:** If the user interrupts after a delegated job may have completed, first do a zero-time/snapshot wait call (`p_timeout_seconds => 0`) for the existing job before creating any new job.
+- **Preserve conversation:** Preserve `conversation_id` for continuation.
+- **Job cardinality:** One logical task = one job ID.
+
+### Fallback direct inspection query shape (debug only):
 
 ```sql
 select
