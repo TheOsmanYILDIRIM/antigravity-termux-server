@@ -10,6 +10,7 @@ const { spawn, exec, execSync } = require("child_process");
 const BUILTIN_ACTIONS = Object.freeze({
   "agy-start": { id: "agy-start", label: "AGY başlat", compactLabel: "Başlat", category: "AGY", icon: "play_arrow", order: 10, executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/.termux/tasker/agy-web-start.sh"] },
   "agy-stop": { id: "agy-stop", label: "AGY durdur", compactLabel: "Durdur", category: "AGY", icon: "stop", order: 20, executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/.termux/tasker/agy-web-stop.sh"] },
+  "system-update": { id: "system-update", label: "Antigravity sunucusunu güncelle", compactLabel: "Sunucuyu Güncelle", category: "Güncellemeler", icon: "system_update", order: 10, executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/antigravity-termux-server/bin/agy-update"] },
   "vault-sync": { id: "vault-sync", label: "Vault senkronize et", compactLabel: "Senkronize", category: "Sistem", icon: "sync", order: 30, executable: "/data/data/com.termux/files/usr/bin/python3", args: ["/data/data/com.termux/files/home/vault/beyin.py", "sync"] },
   "agy-bridge-start": { id: "agy-bridge-start", label: "ChatGPT Bridge başlat", compactLabel: "ChatGPT Başlat", category: "ChatGPT Bridge", icon: "play_arrow", order: 10, executable: "/data/data/com.termux/files/usr/bin/agy-bridge", args: ["start"] },
   "agy-bridge-stop": { id: "agy-bridge-stop", label: "ChatGPT Bridge durdur", compactLabel: "ChatGPT Durdur", category: "ChatGPT Bridge", icon: "stop", order: 20, executable: "/data/data/com.termux/files/usr/bin/agy-bridge", args: ["stop"] },
@@ -41,6 +42,7 @@ const BUILTIN_ACTIONS = Object.freeze({
 });
 const ACTIONS_MANIFEST = "/data/data/com.termux/files/home/.config/terminal-hub/actions.json";
 const SCHEDULES_REGISTRY = "/data/data/com.termux/files/home/.config/terminal-hub/schedules.json";
+const ALWAYS_AVAILABLE_ACTION_IDS = new Set(["system-update"]);
 function normalizeAction(raw) {
   if (!raw || typeof raw !== "object" || typeof raw.id !== "string" || !/^[A-Za-z0-9._:-]{1,96}$/.test(raw.id)) return null;
   if (typeof raw.label !== "string" || typeof raw.executable !== "string" || !path.isAbsolute(raw.executable)) return null;
@@ -65,11 +67,17 @@ function getActions() {
       const enabled = Array.isArray(manifest.enabled) ? new Set(manifest.enabled.filter(id => typeof id === "string")) : null;
       const configured = manifest.actions.map(normalizeAction).filter(Boolean);
       const entries = configured.filter(action => !enabled || enabled.has(action.id));
-      return Object.fromEntries(entries.map(action => [action.id, action]));
+      const output = Object.fromEntries(entries.map(action => [action.id, action]));
+      for (const id of ALWAYS_AVAILABLE_ACTION_IDS) {
+        if (normalizedBuiltins[id] && !output[id]) output[id] = normalizedBuiltins[id];
+      }
+      return output;
     }
     if (!Array.isArray(manifest.enabled)) return normalizedBuiltins;
     const enabled = new Set(manifest.enabled.filter(id => typeof id === "string"));
-    return Object.fromEntries(Object.entries(normalizedBuiltins).filter(([id]) => enabled.has(id)));
+    return Object.fromEntries(
+      Object.entries(normalizedBuiltins).filter(([id]) => enabled.has(id) || ALWAYS_AVAILABLE_ACTION_IDS.has(id))
+    );
   } catch (err) {
     console.error("[ACTIONS] Invalid manifest; using built-in registry:", err.message);
     return normalizedBuiltins;
