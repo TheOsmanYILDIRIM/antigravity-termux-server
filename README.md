@@ -236,7 +236,7 @@ cp bridge/bridge.env.example ~/.config/antigravity-bridge/bridge.env
 chmod 600 ~/.config/antigravity-bridge/bridge.env
 ```
 
-3. Dosyaya proje URL'sini ve yalnız Termux'ta tutulacak server-side secret/service-role key'i yazın.
+3. Dosyaya proje URL'sini, publishable key'i ve yalnız Termux'ta üretilecek bridge client secret'ını yazın. Gerçek bridge secret cihazdan çıkmamalıdır.
 4. Mevcut AGY sunucusunu ve relay'i başlatın:
 
 ```bash
