@@ -172,4 +172,6 @@ The raw device secret must remain on Termux. Supabase stores only its SHA-256 ha
 
 The public completion RPC remains `SECURITY INVOKER`. The narrowly scoped result upsert runs through a helper kept in the non-exposed `private` schema.
 
+`private.wait_agent_job` is an operator/internal primitive and must not be anonymously exposed; it is defined with `SECURITY INVOKER`, empty `search_path = ''`, and restricted from public/anonymous execution to enforce least privilege.
+
 Do not expose the service-role or secret key to Termux, Android, prompts, logs, or source control.

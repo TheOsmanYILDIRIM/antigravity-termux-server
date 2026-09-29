@@ -1,37 +1,38 @@
 -- Antigravity ChatGPT Agent Bridge Migration
 -- Function: private.wait_agent_job(uuid, integer, integer)
--- Rationale: Closes the polling race window by allowing ChatGPT to perform bounded
--- in-database waiting for terminal status & canonical response_text, eliminating
--- high-frequency client polling and missed completion races.
+-- Rationale: Closes the polling race window by allowing bounded in-database waiting
+-- for terminal status & canonical response_text.
+-- Security: Defined as SECURITY INVOKER with empty search_path, fully-qualified
+-- catalog references, and restricted to service_role/internal operator execution.
 
 begin;
 
 create or replace function private.wait_agent_job(
-  p_job_id uuid,
-  p_timeout_seconds integer default 20,
-  p_poll_interval_ms integer default 500
-) returns jsonb
+  p_job_id pg_catalog.uuid,
+  p_timeout_seconds pg_catalog.integer default 20,
+  p_poll_interval_ms pg_catalog.integer default 500
+) returns pg_catalog.jsonb
 language plpgsql
-security definer
-set search_path = private, public
+security invoker
+set search_path = ''
 as $$
 declare
-  v_timeout_seconds integer;
-  v_poll_interval_ms integer;
-  v_deadline timestamptz;
+  v_timeout_seconds pg_catalog.integer;
+  v_poll_interval_ms pg_catalog.integer;
+  v_deadline pg_catalog.timestamptz;
   v_job record;
-  v_status text;
-  v_terminal boolean;
-  v_ready boolean;
-  v_response_text text;
-  v_conversation_id text;
-  v_error jsonb;
-  v_bot_message jsonb;
-  v_subagents jsonb;
-  v_tasks jsonb;
+  v_status pg_catalog.text;
+  v_terminal pg_catalog.boolean;
+  v_ready pg_catalog.boolean;
+  v_response_text pg_catalog.text;
+  v_conversation_id pg_catalog.text;
+  v_error pg_catalog.jsonb;
+  v_bot_message pg_catalog.jsonb;
+  v_subagents pg_catalog.jsonb;
+  v_tasks pg_catalog.jsonb;
 begin
   if p_job_id is null then
-    return jsonb_build_object(
+    return pg_catalog.jsonb_build_object(
       'error', 'job_id_required',
       'found', false,
       'timed_out', false,
@@ -41,10 +42,10 @@ begin
   end if;
 
   -- Clamp timeout: 0 to 30 seconds (0 allows instant snapshot check)
-  v_timeout_seconds := least(greatest(coalesce(p_timeout_seconds, 20), 0), 30);
+  v_timeout_seconds := pg_catalog.least(pg_catalog.greatest(pg_catalog.coalesce(p_timeout_seconds, 20), 0), 30);
   -- Clamp poll interval: 100ms to 5000ms
-  v_poll_interval_ms := least(greatest(coalesce(p_poll_interval_ms, 500), 100), 5000);
-  v_deadline := clock_timestamp() + make_interval(secs => v_timeout_seconds);
+  v_poll_interval_ms := pg_catalog.least(pg_catalog.greatest(pg_catalog.coalesce(p_poll_interval_ms, 500), 100), 5000);
+  v_deadline := pg_catalog.clock_timestamp() + pg_catalog.make_interval(secs => v_timeout_seconds);
 
   loop
     select
@@ -71,7 +72,7 @@ begin
     where j.id = p_job_id;
 
     if not found then
-      return jsonb_build_object(
+      return pg_catalog.jsonb_build_object(
         'job_id', p_job_id,
         'found', false,
         'status', null,
@@ -83,25 +84,25 @@ begin
 
     v_status := v_job.status;
     v_terminal := v_status in ('completed', 'failed', 'cancelled');
-    v_response_text := coalesce(v_job.response_text, '');
-    v_conversation_id := coalesce(nullif(v_job.result_conversation_id, ''), v_job.job_conversation_id);
+    v_response_text := pg_catalog.coalesce(v_job.response_text, '');
+    v_conversation_id := pg_catalog.coalesce(pg_catalog.nullif(v_job.result_conversation_id, ''), v_job.job_conversation_id);
     v_error := v_job.error;
     v_bot_message := v_job.bot_message;
-    v_subagents := coalesce(v_job.subagents, '[]'::jsonb);
-    v_tasks := coalesce(v_job.tasks, '[]'::jsonb);
+    v_subagents := pg_catalog.coalesce(v_job.subagents, '[]'::pg_catalog.jsonb);
+    v_tasks := pg_catalog.coalesce(v_job.tasks, '[]'::pg_catalog.jsonb);
 
     -- Canonical success contract:
     -- completed + non-empty response_text + durable conversation_id + error null
     v_ready := (
       v_status = 'completed'
-      and length(btrim(v_response_text)) > 0
+      and pg_catalog.length(pg_catalog.btrim(v_response_text)) > 0
       and v_conversation_id is not null
-      and length(btrim(v_conversation_id)) > 0
+      and pg_catalog.length(pg_catalog.btrim(v_conversation_id)) > 0
       and v_error is null
     );
 
     if v_terminal then
-      return jsonb_build_object(
+      return pg_catalog.jsonb_build_object(
         'job_id', v_job.id,
         'found', true,
         'status', v_status,
@@ -123,8 +124,8 @@ begin
       );
     end if;
 
-    if clock_timestamp() >= v_deadline then
-      return jsonb_build_object(
+    if pg_catalog.clock_timestamp() >= v_deadline then
+      return pg_catalog.jsonb_build_object(
         'job_id', v_job.id,
         'found', true,
         'status', v_status,
@@ -146,12 +147,12 @@ begin
       );
     end if;
 
-    perform pg_sleep(v_poll_interval_ms / 1000.0);
+    perform pg_catalog.pg_sleep(v_poll_interval_ms / 1000.0);
   end loop;
 end;
 $$;
 
-grant usage on schema private to anon, service_role;
-grant execute on function private.wait_agent_job(uuid, integer, integer) to anon, service_role;
+revoke all on function private.wait_agent_job(pg_catalog.uuid, pg_catalog.integer, pg_catalog.integer) from public, anon, authenticated;
+grant execute on function private.wait_agent_job(pg_catalog.uuid, pg_catalog.integer, pg_catalog.integer) to service_role;
 
 commit;

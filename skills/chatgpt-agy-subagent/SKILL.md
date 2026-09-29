@@ -515,6 +515,7 @@ select private.wait_agent_job(
 - **Debug-only events:** Read `agent_events` ONLY for debugging (failed job, stale heartbeat, repeated timeout, protocol mismatch), NOT for normal waiting.
 - **Interruption snapshot:** If the user interrupts after a delegated job may have completed, first do a zero-time/snapshot wait call (`p_timeout_seconds => 0`) for the existing job before creating any new job.
 - **Continuation:** Preserve `conversation_id` for continuation.
+- **Security & least privilege:** `private.wait_agent_job` is an operator/internal primitive and must not be anonymously exposed; it is defined with `SECURITY INVOKER`, empty `search_path = ''`, and restricted from anonymous/public execution to enforce least privilege.
 - **Job cardinality:** One logical task = one job ID.
 
 ### 9.2 Success contract
