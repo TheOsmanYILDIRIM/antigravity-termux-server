@@ -175,6 +175,7 @@ The bridge supports bounded top-level parallel job execution:
 - **Safety boundaries for ChatGPT delegation:**
   - *Safe parallel jobs:* Read-only tasks, independent repositories, or disjoint directory work.
   - *Sequential requirement:* If multiple tasks write to the same repo, files, or git branch, ChatGPT must sequence them (or continue in the same conversation) to prevent race conditions or merge conflicts.
+- **Relay lifecycle rule:** A bridge worker must not synchronously restart its own relay while holding an active job. Doing so terminates the active worker and drops the lease; self-restart must be orchestrated out-of-band or after terminal result persistence.
 
 ## Security boundary
 

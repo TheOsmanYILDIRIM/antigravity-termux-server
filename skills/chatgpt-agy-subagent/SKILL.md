@@ -617,6 +617,7 @@ ChatGPT can enqueue multiple independent top-level AGY jobs simultaneously. The 
 - Each job maintains a distinct `job_id`, atomic lease/claim token, independent heartbeat, and result row.
 - Safe parallel use cases: Independent read-only searches, multi-repo investigations, or disjoint tasks.
 - **Strict safety rule:** Do NOT execute parallel top-level jobs that write to or edit the same directory, files, or git branch simultaneously. When jobs share mutable state, sequence them sequentially or continue within the same conversation.
+- **Relay self-restart rule:** A bridge worker / AGY execution must not synchronously restart its own bridge relay while holding an active job. Self-restart must be orchestrated out-of-band or after terminal result persistence.
 
 ### 12.2 Internal AGY Subagents (AGY → AGY)
 AGY itself may spawn child subagents (`invoke_subagent`) when a single delegated task naturally decomposes into independent workstreams, for example:
