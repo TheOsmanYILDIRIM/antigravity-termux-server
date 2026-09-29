@@ -49,6 +49,12 @@ mkdir -p "$HOME/uploads"
 mkdir -p "$HOME/agy-vault"
 mkdir -p "$HOME/.config/antigravity-bridge"
 mkdir -p "$HOME/.cache/antigravity-bridge"
+mkdir -p "$HOME/.config/terminal-hub/actions.d"
+if [ ! -f "$HOME/.config/terminal-hub/actions.json" ] && [ -f "$REPO_DIR/actions.json.example" ]; then
+    cp "$REPO_DIR/actions.json.example" "$HOME/.config/terminal-hub/actions.json"
+    chmod 600 "$HOME/.config/terminal-hub/actions.json"
+    echo "  • Varsayılan Actions manifesti oluşturuldu."
+fi
 
 # 4. Termux Optimizasyonları
 echo "⚡ Termux optimizasyonları kontrol ediliyor..."
