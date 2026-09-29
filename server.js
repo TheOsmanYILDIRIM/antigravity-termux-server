@@ -289,45 +289,6 @@ async function checkAndRefreshToken(force = false) {
   }
 }
 
-function checkAndAutoSwitchAccount() {
-  try {
-    const agyAuthBin = "/data/data/com.termux/files/usr/bin/agy-auth";
-    if (!fs.existsSync(agyAuthBin)) return null;
-    const { execSync } = require("child_process");
-    const out = execSync("nice -n 15 taskset -c 0-5 " + agyAuthBin + " auto --json 2>/dev/null", {
-      encoding: "utf-8",
-      timeout: 6000,
-      env: { ...process.env, HOME: "/data/data/com.termux/files/home" }
-    });
-    const parsed = JSON.parse(out);
-    if (parsed && parsed.action === "switch" && parsed.applied) {
-      let fromEmail = parsed.from_email || parsed.from || parsed.active || "önceki";
-      let toEmail = parsed.to_email || parsed.target || "yeni";
-      try {
-        const metaPath = "/data/data/com.termux/files/home/.local/share/agy-auth/meta.json";
-        if (fs.existsSync(metaPath)) {
-          const metaObj = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
-          const accs = (metaObj && metaObj.accounts) || {};
-          if (accs[parsed.active] && accs[parsed.active].email) fromEmail = accs[parsed.active].email;
-          if (accs[parsed.target] && accs[parsed.target].email) toEmail = accs[parsed.target].email;
-        }
-      } catch (e) {}
-      const reason = parsed.reason || "Kota eşik altına indi";
-      try {
-        fs.appendFileSync("/data/data/com.termux/files/home/agy_diag.log",
-          `[${new Date().toISOString()}] [AUTH] Auto-switched account from=${fromEmail} to=${toEmail} reason=${reason}\n`);
-      } catch (e) {}
-      return { switched: true, from: parsed.active, to: parsed.target, fromEmail, toEmail, reason };
-    }
-  } catch (e) {
-    try {
-      fs.appendFileSync("/data/data/com.termux/files/home/agy_diag.log",
-        `[${new Date().toISOString()}] [AUTH] checkAndAutoSwitchAccount error: ${e.message}\n`);
-    } catch (err) {}
-  }
-  return null;
-}
-
 checkAndRefreshToken().catch(() => {});
 setInterval(() => {
   checkAndRefreshToken().catch(() => {});
@@ -661,6 +622,31 @@ async function getBrainConversations(force = false) {
 
   await scanBrainConversationsIncremental(force);
   return Array.from(brainConversationsCache.values()).sort((a, b) => new Date(b.lastMessageTime) - new Date(a.lastMessageTime));
+}
+
+function upsertActiveConversationCache(convId) {
+  if (!convId) return;
+  const existing = brainConversationsCache.get(convId) || {};
+  const now = new Date().toISOString();
+  const userTurns = Array.isArray(currentSession.messages)
+    ? currentSession.messages.filter(m => m && m.role === "user").length
+    : 0;
+  brainConversationsCache.set(convId, {
+    ...existing,
+    id: convId,
+    title: currentSession.title || existing.title || "Antigravity IDE Sohbeti",
+    projectName: currentSession.projectName || existing.projectName || null,
+    projectTag: currentSession.projectTag || existing.projectTag || null,
+    createdAt: existing.createdAt || currentSession.createdAt || now,
+    lastMessageTime: now,
+    messageCount: Math.max(existing.messageCount || 0, userTurns || 1),
+    mtimeMs: null,
+    size: null,
+    isSubagent: Boolean(existing.isSubagent),
+    parentConversationId: existing.parentConversationId || null,
+    subagentsCount: existing.subagentsCount || 0
+  });
+  queueSaveBrainCache();
 }
 
 // Background incremental scanner every 30 seconds
@@ -2719,18 +2705,20 @@ const server = http.createServer(async (req, res) => {
   if (pathname === "/api/conversations" && req.method === "GET") {
     const list = await getBrainConversations();
     const activeConvId = currentSession.conversationId || currentSession.id;
+    const generatingIds = new Set(activeProcesses.keys());
+    if (currentSession.isGenerating && activeConvId) generatingIds.add(activeConvId);
     const includeSubagents = (req.url && (req.url.includes("includeSubagents=true") || req.url.includes("all=true")));
     const filteredList = includeSubagents ? list : list.filter(c => !c.isSubagent);
     const enrichedList = filteredList.map(c => ({
       ...c,
-      isGenerating: Boolean(currentSession.isGenerating && (activeConvId === c.id))
+      isGenerating: generatingIds.has(c.id)
     }));
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({
       status: "ok",
       currentSessionId: activeConvId,
-      activeGeneratingId: currentSession.isGenerating ? activeConvId : null,
-      isGenerating: currentSession.isGenerating,
+      activeGeneratingId: activeConvId && generatingIds.has(activeConvId) ? activeConvId : (generatingIds.values().next().value || null),
+      isGenerating: generatingIds.size > 0,
       conversations: enrichedList
     }));
     return;
@@ -3382,7 +3370,8 @@ const server = http.createServer(async (req, res) => {
 
                   if (eventObj.event === "init") {
                     if (eventObj.conversation_id) {
-                      activeProcesses.delete(this.activeConvId);
+                      const previousActiveConvId = this.activeConvId;
+                      activeProcesses.delete(previousActiveConvId);
                       if (this.convId) persistentWorkers.delete(this.convId);
                       this.convId = eventObj.conversation_id;
                       this.activeConvId = eventObj.conversation_id;
@@ -3390,8 +3379,16 @@ const server = http.createServer(async (req, res) => {
                       activeProcesses.set(this.activeConvId, { child, botMessage: this.currentBotMessage, activeConvId: this.activeConvId });
                       currentSession.conversationId = eventObj.conversation_id;
                       currentSession.id = eventObj.conversation_id;
-                      broadcastSSE("init", { conversationId: eventObj.conversation_id, requestId: this.currentRequestId });
-                      broadcastSSE("generating_start", { conversationId: eventObj.conversation_id, isGenerating: true });
+                      upsertActiveConversationCache(this.activeConvId);
+                      if (previousActiveConvId && previousActiveConvId !== this.activeConvId) {
+                        broadcastSSE("conversation_rebound", {
+                          fromConversationId: previousActiveConvId,
+                          conversationId: this.activeConvId,
+                          requestId: this.currentRequestId
+                        });
+                      }
+                      broadcastSSE("init", { conversationId: this.activeConvId, requestId: this.currentRequestId });
+                      broadcastSSE("generating_start", { conversationId: this.activeConvId, isGenerating: true, requestId: this.currentRequestId });
                     }
                     this.isReady = true;
                     while (this.initWaiters.length > 0) {
@@ -3471,6 +3468,20 @@ const server = http.createServer(async (req, res) => {
                     if (update.usage && this.currentBotMessage) {
                       this.currentBotMessage.usage = update.usage;
                     }
+
+                    const textStepState = String(update.state || "").toUpperCase();
+                    if (
+                      this.currentBotMessage &&
+                      this.currentBotMessage.content &&
+                      !update.tool_name &&
+                      !update.tool_info &&
+                      ["DONE", "SUCCESS", "COMPLETED", "FINISHED"].includes(textStepState)
+                    ) {
+                      broadcastSSE("response_finalizing", {
+                        conversationId: this.activeConvId,
+                        requestId: this.currentRequestId
+                      });
+                    }
                   } else if (eventObj.event === "result") {
                     const resObj = eventObj.result;
                     const resultStatus = (resObj && resObj.status) ? String(resObj.status).toUpperCase() : null;
@@ -3490,7 +3501,8 @@ const server = http.createServer(async (req, res) => {
                     // The AGY terminal result is authoritative for its conversation id.
                     // This also recovers the id when an init event was missed upstream.
                     if (resultConversationId && resultConversationId !== this.activeConvId) {
-                      activeProcesses.delete(this.activeConvId);
+                      const previousActiveConvId = this.activeConvId;
+                      activeProcesses.delete(previousActiveConvId);
                       if (this.convId) persistentWorkers.delete(this.convId);
                       this.convId = resultConversationId;
                       this.activeConvId = resultConversationId;
@@ -3498,6 +3510,14 @@ const server = http.createServer(async (req, res) => {
                       activeProcesses.set(this.activeConvId, { child, botMessage: this.currentBotMessage, activeConvId: this.activeConvId });
                       currentSession.conversationId = resultConversationId;
                       currentSession.id = resultConversationId;
+                      upsertActiveConversationCache(this.activeConvId);
+                      broadcastSSE("conversation_rebound", {
+                        fromConversationId: previousActiveConvId,
+                        conversationId: this.activeConvId,
+                        requestId: this.currentRequestId
+                      });
+                    } else if (resultConversationId) {
+                      upsertActiveConversationCache(resultConversationId);
                     }
 
                     // A terminal AGY result is successful only when status is SUCCESS.
@@ -3513,7 +3533,7 @@ const server = http.createServer(async (req, res) => {
                       this.isBusy = false;
                       currentSession.isGenerating = false;
                       activeProcesses.delete(this.activeConvId);
-                      broadcastSSE("generating_done", { conversationId: this.activeConvId, isGenerating: false });
+                      broadcastSSE("generating_done", { conversationId: this.activeConvId, isGenerating: false, requestId: this.currentRequestId });
                       this.resetIdleTimer();
                       continue;
                     }
@@ -3615,7 +3635,7 @@ const server = http.createServer(async (req, res) => {
                     this.isBusy = false;
                     currentSession.isGenerating = false;
                     activeProcesses.delete(this.activeConvId);
-                    broadcastSSE("generating_done", { conversationId: this.activeConvId, isGenerating: false });
+                    broadcastSSE("generating_done", { conversationId: this.activeConvId, isGenerating: false, requestId: this.currentRequestId });
                     this.resetIdleTimer();
                   }
                 } catch (err) {}
@@ -3645,7 +3665,7 @@ const server = http.createServer(async (req, res) => {
             child.on("error", (err) => {
               this.cleanup();
               currentSession.isGenerating = false;
-              broadcastSSE("generating_done", { conversationId: this.activeConvId, isGenerating: false });
+              broadcastSSE("generating_done", { conversationId: this.activeConvId, isGenerating: false, requestId: this.currentRequestId });
               if (this.currentBotMessage) {
                 this.currentBotMessage.state = "error";
                 this.currentBotMessage.content += "\n\n⚠️ *Hata: " + err.message + "*";
@@ -3660,13 +3680,13 @@ const server = http.createServer(async (req, res) => {
               if (manualStop) {
                 manualStop = false;
                 currentSession.isGenerating = false;
-                broadcastSSE("generating_done", { conversationId: this.activeConvId, isGenerating: false });
+                broadcastSSE("generating_done", { conversationId: this.activeConvId, isGenerating: false, requestId: this.currentRequestId });
                 return;
               }
 
               if (wasBusy) {
                 currentSession.isGenerating = false;
-                broadcastSSE("generating_done", { conversationId: this.activeConvId, isGenerating: false });
+                broadcastSSE("generating_done", { conversationId: this.activeConvId, isGenerating: false, requestId: this.currentRequestId });
                 if (this.currentBotMessage && (!this.currentBotMessage.content || this.currentBotMessage.content.trim().length === 0)) {
                   this.currentBotMessage.state = "error";
                   this.currentBotMessage.content = "⚠️ *Üretim süreci sonlandı (exit " + code + ").*";
@@ -3687,21 +3707,16 @@ const server = http.createServer(async (req, res) => {
             if (this.idleTimer) clearTimeout(this.idleTimer);
             activeProcesses.set(this.activeConvId, { child: this.child, botMessage: botMsg, activeConvId: this.activeConvId });
 
-            const doSend = () => {
-              if (!this.child || this.child.exitCode !== null || !this.child.stdin || this.child.stdin.destroyed) {
-                this.start(1);
-                this.initWaiters.push(() => {
-                  this.writePayload(promptText);
-                });
-              } else {
-                this.writePayload(promptText);
-              }
-            };
+            if (!this.child || this.child.exitCode !== null || !this.child.stdin || this.child.stdin.destroyed) {
+              this.start(1);
+            }
 
-            if (!this.isReady) {
-              this.initWaiters.push(doSend);
+            if (this.child && this.child.exitCode === null && this.child.stdin && !this.child.stdin.destroyed) {
+              // stream-json input is driver-led. stdin can safely buffer while
+              // AGY finishes emitting its init handshake.
+              this.writePayload(promptText);
             } else {
-              doSend();
+              this.initWaiters.push(() => this.writePayload(promptText));
             }
           }
 
@@ -3752,19 +3767,10 @@ const server = http.createServer(async (req, res) => {
           }
         }
 
-        async function handleChatExecution() {
-          try {
-            await checkAndRefreshToken();
-          } catch (e) {}
-
-          let switchNotice = null;
-          try {
-            const switchRes = checkAndAutoSwitchAccount();
-            if (switchRes && switchRes.switched) {
-              const fromLabel = switchRes.fromEmail ? `\`${switchRes.fromEmail}\`` : `\`${switchRes.from}\``;
-              const toLabel = switchRes.toEmail ? `**\`${switchRes.toEmail}\`**` : `**\`${switchRes.to}\`**`;
-              switchNotice = `> 🔄 **[Otomatik Hesap Geçişi]** ${fromLabel} hesabının kotası azaldığı için ${toLabel} hesabına geçildi.\n\n`;
-              const targetId = conversationId || currentSession.conversationId;
+        function handleChatExecution() {
+          // Actions are explicit user-invoked shell shortcuts. Never run agy-auth
+          // or any other Action implicitly in the chat message critical path.
+          const targetId = conversationId || currentSession.conversationId;
               const existingWorker = targetId ? persistentWorkers.get(targetId) : null;
               if (existingWorker) {
                 existingWorker.destroy();
@@ -3801,15 +3807,6 @@ const server = http.createServer(async (req, res) => {
             });
             worker.start(1);
             if (targetId) persistentWorkers.set(targetId, worker);
-          }
-
-          if (switchNotice && botMessage) {
-            botMessage.content = switchNotice;
-            broadcastSSE("chunk", {
-              text_delta: switchNotice,
-              full_content: botMessage.content,
-              conversationId: activeConvId
-            });
           }
 
           worker.sendTurn(fullPromptForAgy, botMessage, requestId);
