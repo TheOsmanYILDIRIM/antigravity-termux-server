@@ -35,5 +35,5 @@ jobs:
           bash -n bin/agy-update
           bash -n install.sh
 
-      - name: Validate action manifest example
-        run: node -e "JSON.parse(require('fs').readFileSync('actions.json.example','utf8')); console.log('actions.json.example OK')"
+      - name: Validate external action catalog
+        run: node scripts/validate-actions.js
