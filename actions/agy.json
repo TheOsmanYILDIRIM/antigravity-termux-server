@@ -10,7 +10,8 @@
       "executable": "/data/data/com.termux/files/usr/bin/bash",
       "args": [
         "/data/data/com.termux/files/home/.termux/tasker/agy-web-start.sh"
-      ]
+      ],
+      "schedulable": true
     },
     {
       "id": "agy-stop",
