@@ -104,7 +104,13 @@ readlink
 realpath
 ```
 
-AGY may recursively search all of `$HOME` when necessary to locate an unknown file, repository, log, configuration, symbol, string, or artifact.
+AGY may search `$HOME` when necessary to locate an unknown file, repository, log, configuration, symbol, string, or artifact.
+
+#### Discovery discipline:
+- If the task names an exact repo, path, or service, start directly at that target.
+- Do not recursively scan all of `$HOME` when a named target/path is already known.
+- **Search escalation ladder:** exact path/current repo -> likely project dirs (`~/projects`, `~/.config`) -> bounded-depth targeted search (`find -maxdepth 3`, `rg --max-depth`) -> broad `$HOME` scan only as a last resort.
+- Stop searching immediately once the canonical target is identified.
 
 When searching broadly, prefer metadata/index-style discovery first:
 
@@ -541,6 +547,14 @@ Use `agent_results.response_text` as the canonical ChatGPT-facing result.
 `bot_message.tools`, `subagents` and `tasks` are supporting evidence.
 
 Do not mark success merely because a command was launched or a `done` event appeared.
+
+### 9.3 Database / SQL validation discipline
+
+For bridge schema or migration changes:
+- JS and shell syntax CI checks are not sufficient proof of SQL correctness.
+- Before declaring success, validate the SQL against a real Postgres/Supabase database (prefer staging/test; if applying to the connected bridge project is explicitly part of the operator task, use MCP migration/SQL and verify runtime call).
+- Perform at least one real function invocation for newly added DB functions/RPCs and verify expected privileges when security-sensitive.
+- Preserve the actual DB error if validation fails; do not claim success based only on static checks.
 
 ---
 
