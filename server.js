@@ -51,9 +51,32 @@ function getManagedTasks() {
   }
 }
 
-function manifestForReload() {
+function getActionCatalogSnapshot() {
   const actions = getActions();
-  return { enabled: Object.keys(actions), actionCount: Object.keys(actions).length };
+  const publicActions = Object.values(actions)
+    .map(({ id, label, compactLabel, category, icon, order, schedulable }) => ({
+      id,
+      label,
+      compactLabel,
+      category,
+      icon,
+      order,
+      schedulable: schedulable === true
+    }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+  const version = crypto.createHash("sha1")
+    .update(JSON.stringify(publicActions))
+    .digest("hex");
+  return { actions, publicActions, version };
+}
+
+function manifestForReload() {
+  const snapshot = getActionCatalogSnapshot();
+  return {
+    enabled: Object.keys(snapshot.actions),
+    actionCount: Object.keys(snapshot.actions).length,
+    version: snapshot.version
+  };
 }
 function readSchedules() {
   try {
@@ -816,6 +839,33 @@ function broadcastSSE(event, data) {
     require("fs").appendFileSync("/data/data/com.termux/files/home/agy_sse.log", diagLine + "\n");
   } catch (e) {}
 }
+
+let lastActionCatalogVersion = null;
+try {
+  lastActionCatalogVersion = getActionCatalogSnapshot().version;
+} catch (e) {}
+
+setInterval(() => {
+  try {
+    const snapshot = getActionCatalogSnapshot();
+    if (lastActionCatalogVersion === null) {
+      lastActionCatalogVersion = snapshot.version;
+      return;
+    }
+    if (snapshot.version !== lastActionCatalogVersion) {
+      const previousVersion = lastActionCatalogVersion;
+      lastActionCatalogVersion = snapshot.version;
+      broadcastSSE("action_catalog_changed", {
+        version: snapshot.version,
+        previousVersion,
+        actionCount: snapshot.publicActions.length,
+        changedAt: Date.now()
+      });
+    }
+  } catch (e) {
+    // Invalid local action files are already skipped/logged by the registry.
+  }
+}, 2000);
 
 function getImageMetadataAndOptimize(filePath) {
   if (!filePath || !fs.existsSync(filePath)) return null;
@@ -1902,13 +1952,12 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === "/api/actions" && req.method === "GET") {
-    const actions = getActions();
+    const snapshot = getActionCatalogSnapshot();
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
     res.end(JSON.stringify({
       status: "ok",
-      actions: Object.values(actions).map(({ id, label, compactLabel, category, icon, order, schedulable }) => ({
-        id, label, compactLabel, category, icon, order, schedulable: schedulable === true
-      }))
+      version: snapshot.version,
+      actions: snapshot.publicActions
     }));
     return;
   }
