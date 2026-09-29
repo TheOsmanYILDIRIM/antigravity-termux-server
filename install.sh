@@ -33,10 +33,12 @@ fi
 # 2. İzinler ve Symlink'ler
 echo "🔗 CLI kısayolları ($BIN_DIR) yapılandırılıyor..."
 chmod +x "$REPO_DIR/bin/agy-web"
+chmod +x "$REPO_DIR/bin/agy-update"
 chmod +x "$REPO_DIR/bin/agy-ci-watch"
 [ -f "$REPO_DIR/bin/agy-bridge" ] && chmod +x "$REPO_DIR/bin/agy-bridge"
 
 ln -sf "$REPO_DIR/bin/agy-web" "$BIN_DIR/agy-web"
+ln -sf "$REPO_DIR/bin/agy-update" "$BIN_DIR/agy-update"
 ln -sf "$REPO_DIR/bin/agy-ci-watch" "$BIN_DIR/agy-ci-watch"
 [ -f "$REPO_DIR/bin/agy-bridge" ] && ln -sf "$REPO_DIR/bin/agy-bridge" "$BIN_DIR/agy-bridge"
 
@@ -76,6 +78,8 @@ echo "📌 Kullanım Komutları:"
 echo "   agy-web start    -> Sunucuyu tmux arka planında başlatır (Port: 8080)"
 echo "   agy-web status   -> Sunucu durumunu ve PID kontrol eder"
 echo "   agy-web stop     -> Sunucuyu durdurur"
+echo "   agy-web update   -> Güvenli güncelleme + doğrulama + restart"
+echo "   agy-update       -> Aynı güvenli güncelleyiciyi doğrudan çalıştırır"
 echo "   agy-web attach   -> Canlı log ekranına bağlanır"
 echo "   agy-ci-watch     -> GitHub Actions CI/CD izleyici & otomatik onarım"
 echo "   agy-bridge       -> ChatGPT ↔ Supabase ↔ AGY relay yönetimi"
