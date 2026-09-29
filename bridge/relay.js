@@ -177,7 +177,7 @@ async function collectResult(job, conversationId, doneBot = null) {
 }
 
 async function runJob(job) {
-  const stopHeartbeat = startHeartbeat(job); let stream = null; let conversationId = job.conversation_id || null; let doneBot = null;
+  const stopHeartbeat = startHeartbeat(job); let stream = null; let conversationId = job.conversation_id || null; let doneBot = null; let streamedText = "";
   const deadline = Date.now() + cfg.jobTimeoutMs;
   try {
     await event(job.id, "relay_claimed", { workerId: cfg.workerId, attempt: job.attempts });
@@ -192,12 +192,29 @@ async function runJob(job) {
       if (!belongs(ev, job, conversationId)) continue;
       const d = ev.data || {};
       if (ev.name === "init" && d.conversationId) { conversationId = d.conversationId; await bindConversation(job, conversationId); }
+      if (ev.name === "chunk") {
+        if (typeof d.full_content === "string" && d.full_content.length >= streamedText.length) streamedText = d.full_content;
+        else if (typeof d.text_delta === "string") streamedText += d.text_delta;
+      }
       if (persistedEvents.has(ev.name)) await event(job.id, ev.name, d);
-      if (ev.name === "done") { conversationId = d.conversationId || conversationId; doneBot = d.botMessage || null; break; }
+      if (ev.name === "done") {
+        conversationId = d.conversationId || conversationId;
+        doneBot = d.botMessage || null;
+        if (streamedText.trim()) {
+          if (!doneBot || typeof doneBot !== "object") doneBot = { role: "bot", state: "done", tools: [] };
+          if (!String(doneBot.content || "").trim()) doneBot.content = streamedText;
+        }
+        break;
+      }
       if (ev.name === "error" || ev.name === "stopped") { const e = new Error(d.error || d.message || ev.name); e.code = ev.name === "error" ? "AGY_ERROR" : "AGY_STOPPED"; throw e; }
     }
     if (Date.now() >= deadline) { const e = new Error("AGY job timeout"); e.code = "JOB_TIMEOUT"; throw e; }
     const result = await collectResult(job, conversationId, doneBot);
+    if (!String(result.responseText || "").trim()) {
+      const e = new Error("AGY completed without a recoverable final response");
+      e.code = "EMPTY_FINAL_RESPONSE";
+      throw e;
+    }
     if (!(await completeJob(job, result))) throw new Error("lost job ownership at completion");
     await event(job.id, "relay_completed", { conversationId: result.conversationId, responseChars: result.responseText.length, subagents: result.subagents.length, tasks: result.tasks.length });
     log("INFO", "job completed", { jobId: job.id, conversationId: result.conversationId });
