@@ -138,32 +138,78 @@ begin
 end;
 $$;
 
+create or replace function private.write_agent_result(
+  p_job_id uuid,
+  p_conversation_id text,
+  p_response_text text,
+  p_bot_message jsonb,
+  p_subagents jsonb,
+  p_tasks jsonb
+) returns void
+language plpgsql
+security definer
+set search_path = private, public
+as $
+begin
+  insert into public.agent_results(job_id,conversation_id,response_text,bot_message,subagents,tasks,created_at)
+  values(
+    p_job_id,
+    nullif(p_conversation_id,''),
+    coalesce(p_response_text,''),
+    p_bot_message,
+    coalesce(p_subagents,'[]'::jsonb),
+    coalesce(p_tasks,'[]'::jsonb),
+    now()
+  )
+  on conflict(job_id) do update set
+    conversation_id=excluded.conversation_id,
+    response_text=excluded.response_text,
+    bot_message=excluded.bot_message,
+    subagents=excluded.subagents,
+    tasks=excluded.tasks,
+    created_at=excluded.created_at;
+end;
+$;
+
+grant usage on schema private to anon, service_role;
+grant execute on function private.write_agent_result(uuid,text,text,jsonb,jsonb,jsonb) to anon, service_role;
+
 create or replace function public.complete_agent_job(
   p_job_id uuid,p_worker_id text,p_claim_token uuid,p_conversation_id text,p_response_text text,
   p_bot_message jsonb default null,p_subagents jsonb default '[]'::jsonb,p_tasks jsonb default '[]'::jsonb
 ) returns boolean
-language plpgsql security invoker set search_path=public
-as $$
+language plpgsql
+security invoker
+set search_path=public,private
+as $
 declare n integer;
 begin
   update public.agent_jobs
-  set status='completed',conversation_id=coalesce(nullif(p_conversation_id,''),conversation_id),
-      completed_at=now(),heartbeat_at=now(),lease_expires_at=null,updated_at=now(),error=null
+  set status='completed',
+      conversation_id=coalesce(nullif(p_conversation_id,''),conversation_id),
+      completed_at=now(),
+      heartbeat_at=now(),
+      lease_expires_at=null,
+      updated_at=now(),
+      error=null
   where id=p_job_id and worker_id=p_worker_id and claim_token=p_claim_token
     and status in ('claimed','running');
+
   get diagnostics n=row_count;
   if n<>1 then return false; end if;
 
-  insert into public.agent_results(job_id,conversation_id,response_text,bot_message,subagents,tasks,created_at)
-  values(p_job_id,nullif(p_conversation_id,''),coalesce(p_response_text,''),p_bot_message,
-         coalesce(p_subagents,'[]'::jsonb),coalesce(p_tasks,'[]'::jsonb),now())
-  on conflict(job_id) do update set
-    conversation_id=excluded.conversation_id,response_text=excluded.response_text,
-    bot_message=excluded.bot_message,subagents=excluded.subagents,tasks=excluded.tasks,
-    created_at=excluded.created_at;
+  perform private.write_agent_result(
+    p_job_id,
+    p_conversation_id,
+    p_response_text,
+    p_bot_message,
+    p_subagents,
+    p_tasks
+  );
+
   return true;
 end;
-$$;
+$;
 
 create or replace function public.fail_agent_job(
   p_job_id uuid,p_worker_id text,p_claim_token uuid,p_error jsonb
