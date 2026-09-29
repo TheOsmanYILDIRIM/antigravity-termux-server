@@ -21,10 +21,14 @@
     "agy-auth-ps",
     "agy-auth-refresh",
     "agy-auth-auto-dry-run",
-    "dl-clean",
     "dl-organize",
     "dl-list",
     "dl-rollback",
+    "agy-bridge-start",
+    "agy-bridge-stop",
+    "agy-bridge-restart",
+    "agy-bridge-status",
+    "agy-bridge-logs",
     "custom-example"
   ]
 }

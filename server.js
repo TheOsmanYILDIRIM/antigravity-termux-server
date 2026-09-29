@@ -8,31 +8,36 @@ const { spawn, exec, execSync } = require("child_process");
 // Deliberately closed action registry: clients may select an id only.  They can
 // never provide an executable, cwd, or arguments.
 const BUILTIN_ACTIONS = Object.freeze({
-  "agy-start": { id: "agy-start", label: "AGY başlat", executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/.termux/tasker/agy-web-start.sh"] },
-  "agy-stop": { id: "agy-stop", label: "AGY durdur", executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/.termux/tasker/agy-web-stop.sh"] },
-  "vault-sync": { id: "vault-sync", label: "Vault senkronize et", executable: "/data/data/com.termux/files/usr/bin/python3", args: ["/data/data/com.termux/files/home/vault/beyin.py", "sync"] },
-  "codex-start": { id: "codex-start", label: "Codex servisini başlat", executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/antigravity-termux-server/bin/codex-web", "start"] },
-  "codex-stop": { id: "codex-stop", label: "Codex servisini durdur", executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/antigravity-termux-server/bin/codex-web", "stop"] },
-  "opencode-start": { id: "opencode-start", label: "OpenCode servisini başlat", executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/antigravity-termux-server/bin/opencode-web", "start"] },
-  "opencode-stop": { id: "opencode-stop", label: "OpenCode servisini durdur", executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/antigravity-termux-server/bin/opencode-web", "stop"] },
-  "cline-start": { id: "cline-start", label: "Cline servisini başlat", executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/antigravity-termux-server/bin/cline-web", "start"] },
-  "cline-stop": { id: "cline-stop", label: "Cline servisini durdur", executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/antigravity-termux-server/bin/cline-web", "stop"] },
-  "agy-auth-list": { id: "agy-auth-list", label: "AGY hesaplarını listele", executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["list"] },
-  "agy-auth-ls": { id: "agy-auth-ls", label: "AGY hesaplarını listele (ls)", executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["ls"] },
-  "agy-auth-current": { id: "agy-auth-current", label: "Aktif AGY hesabını göster", executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["current"] },
-  "agy-auth-status": { id: "agy-auth-status", label: "AGY auth durumunu göster", executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["status"] },
-  "agy-auth-quota": { id: "agy-auth-quota", label: "AGY kotasını göster", executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["quota"] },
-  "agy-auth-usage": { id: "agy-auth-usage", label: "AGY kotasını göster (usage)", executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["usage"] },
-  "agy-auth-history": { id: "agy-auth-history", label: "AGY kota geçmişini göster", executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["history"] },
-  "agy-auth-sync": { id: "agy-auth-sync", label: "AGY kotalarını senkronize et", executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["sync"] },
-  "agy-auth-doctor": { id: "agy-auth-doctor", label: "AGY auth sağlık kontrolü", executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["doctor"] },
-  "agy-auth-ps": { id: "agy-auth-ps", label: "AGY süreçlerini listele", executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["ps"] },
-  "agy-auth-refresh": { id: "agy-auth-refresh", label: "AGY tokenlarını yenile", executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["refresh"] },
-  "agy-auth-auto-dry-run": { id: "agy-auth-auto-dry-run", label: "AGY otomatik geçişini simüle et", executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["auto", "--dry-run"] },
-  "dl-clean": { id: "dl-clean", label: "İndirilenleri düzenle", executable: "/data/data/com.termux/files/usr/bin/dl-organize", args: [] },
-  "dl-organize": { id: "dl-organize", label: "İndirilenleri düzenle (organize)", executable: "/data/data/com.termux/files/usr/bin/dl-organize", args: [] },
-  "dl-list": { id: "dl-list", label: "İndirme geri alma listesini göster", executable: "/data/data/com.termux/files/usr/bin/python3", args: ["/data/data/com.termux/files/home/projects/download-triage/rollback.py", "--list"] },
-  "dl-rollback": { id: "dl-rollback", label: "İndirmeleri geri al", executable: "/data/data/com.termux/files/usr/bin/python3", args: ["/data/data/com.termux/files/home/projects/download-triage/rollback.py"] }
+  "agy-start": { id: "agy-start", label: "AGY başlat", compactLabel: "Başlat", category: "AGY", icon: "play_arrow", order: 10, executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/.termux/tasker/agy-web-start.sh"] },
+  "agy-stop": { id: "agy-stop", label: "AGY durdur", compactLabel: "Durdur", category: "AGY", icon: "stop", order: 20, executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/.termux/tasker/agy-web-stop.sh"] },
+  "vault-sync": { id: "vault-sync", label: "Vault senkronize et", compactLabel: "Senkronize", category: "Sistem", icon: "sync", order: 30, executable: "/data/data/com.termux/files/usr/bin/python3", args: ["/data/data/com.termux/files/home/vault/beyin.py", "sync"] },
+  "agy-bridge-start": { id: "agy-bridge-start", label: "ChatGPT Bridge başlat", compactLabel: "ChatGPT Başlat", category: "ChatGPT Bridge", icon: "play_arrow", order: 10, executable: "/data/data/com.termux/files/usr/bin/agy-bridge", args: ["start"] },
+  "agy-bridge-stop": { id: "agy-bridge-stop", label: "ChatGPT Bridge durdur", compactLabel: "ChatGPT Durdur", category: "ChatGPT Bridge", icon: "stop", order: 20, executable: "/data/data/com.termux/files/usr/bin/agy-bridge", args: ["stop"] },
+  "agy-bridge-restart": { id: "agy-bridge-restart", label: "ChatGPT Bridge yeniden başlat", compactLabel: "ChatGPT Restart", category: "ChatGPT Bridge", icon: "refresh", order: 30, executable: "/data/data/com.termux/files/usr/bin/agy-bridge", args: ["restart"] },
+  "agy-bridge-status": { id: "agy-bridge-status", label: "ChatGPT Bridge durumunu göster", compactLabel: "ChatGPT Durum", category: "ChatGPT Bridge", icon: "info", order: 40, executable: "/data/data/com.termux/files/usr/bin/agy-bridge", args: ["status"] },
+  "agy-bridge-logs": { id: "agy-bridge-logs", label: "ChatGPT Bridge loglarını göster", compactLabel: "ChatGPT Log", category: "ChatGPT Bridge", icon: "receipt_long", order: 50, executable: "/data/data/com.termux/files/usr/bin/agy-bridge", args: ["logs"] },
+  "codex-start": { id: "codex-start", label: "Codex servisini başlat", compactLabel: "Codex başlat", category: "Servisler", icon: "play_arrow", order: 10, executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/antigravity-termux-server/bin/codex-web", "start"] },
+  "codex-stop": { id: "codex-stop", label: "Codex servisini durdur", compactLabel: "Codex durdur", category: "Servisler", icon: "stop", order: 20, executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/antigravity-termux-server/bin/codex-web", "stop"] },
+  "opencode-start": { id: "opencode-start", label: "OpenCode servisini başlat", compactLabel: "OpenCode başlat", category: "Servisler", icon: "play_arrow", order: 30, executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/antigravity-termux-server/bin/opencode-web", "start"] },
+  "opencode-stop": { id: "opencode-stop", label: "OpenCode servisini durdur", compactLabel: "OpenCode durdur", category: "Servisler", icon: "stop", order: 40, executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/antigravity-termux-server/bin/opencode-web", "stop"] },
+  "cline-start": { id: "cline-start", label: "Cline servisini başlat", compactLabel: "Cline başlat", category: "Servisler", icon: "play_arrow", order: 50, executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/antigravity-termux-server/bin/cline-web", "start"] },
+  "cline-stop": { id: "cline-stop", label: "Cline servisini durdur", compactLabel: "Cline durdur", category: "Servisler", icon: "stop", order: 60, executable: "/data/data/com.termux/files/usr/bin/bash", args: ["/data/data/com.termux/files/home/antigravity-termux-server/bin/cline-web", "stop"] },
+  "agy-auth-list": { id: "agy-auth-list", label: "AGY hesaplarını listele", compactLabel: "Hesaplar", category: "AGY Auth", icon: "list", order: 10, executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["list"] },
+  "agy-auth-ls": { id: "agy-auth-ls", label: "AGY hesaplarını listele (ls)", compactLabel: "Hesaplar (ls)", category: "AGY Auth", icon: "list", order: 15, executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["ls"] },
+  "agy-auth-current": { id: "agy-auth-current", label: "Aktif AGY hesabını göster", compactLabel: "Aktif hesap", category: "AGY Auth", icon: "account_circle", order: 20, executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["current"] },
+  "agy-auth-status": { id: "agy-auth-status", label: "AGY auth durumunu göster", compactLabel: "Durum", category: "AGY Auth", icon: "info", order: 30, executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["status"] },
+  "agy-auth-quota": { id: "agy-auth-quota", label: "AGY kotasını göster", compactLabel: "Kota", category: "AGY Auth", icon: "data_usage", order: 40, executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["quota"] },
+  "agy-auth-usage": { id: "agy-auth-usage", label: "AGY kotasını göster (usage)", compactLabel: "Kota (usage)", category: "AGY Auth", icon: "data_usage", order: 45, executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["usage"] },
+  "agy-auth-history": { id: "agy-auth-history", label: "AGY kota geçmişini göster", compactLabel: "Geçmiş", category: "AGY Auth", icon: "history", order: 50, executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["history"] },
+  "agy-auth-sync": { id: "agy-auth-sync", label: "AGY kotalarını senkronize et", compactLabel: "Sync", category: "AGY Auth", icon: "sync", order: 60, executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["sync"] },
+  "agy-auth-doctor": { id: "agy-auth-doctor", label: "AGY auth sağlık kontrolü", compactLabel: "Doctor", category: "AGY Auth", icon: "health_and_safety", order: 70, executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["doctor"] },
+  "agy-auth-ps": { id: "agy-auth-ps", label: "AGY süreçlerini listele", compactLabel: "Süreçler", category: "AGY Auth", icon: "memory", order: 80, executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["ps"] },
+  "agy-auth-refresh": { id: "agy-auth-refresh", label: "AGY tokenlarını yenile", compactLabel: "Yenile", category: "AGY Auth", icon: "refresh", order: 90, executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["refresh"] },
+  "agy-auth-auto-dry-run": { id: "agy-auth-auto-dry-run", label: "AGY otomatik geçişini simüle et", compactLabel: "Auto test", category: "AGY Auth", icon: "autorenew", order: 100, executable: "/data/data/com.termux/files/usr/bin/agy-auth", args: ["auto", "--dry-run"] },
+  "dl-clean": { id: "dl-clean", label: "İndirilenleri düzenle (clean)", compactLabel: "Temizle", category: "İndirmeler", icon: "cleaning_services", order: 5, executable: "/data/data/com.termux/files/usr/bin/dl-organize", args: [] },
+  "dl-organize": { id: "dl-organize", label: "İndirilenleri düzenle", compactLabel: "Düzenle", category: "İndirmeler", icon: "cleaning_services", order: 10, executable: "/data/data/com.termux/files/usr/bin/dl-organize", args: [] },
+  "dl-list": { id: "dl-list", label: "İndirme geri alma listesini göster", compactLabel: "Listele", category: "İndirmeler", icon: "list", order: 20, executable: "/data/data/com.termux/files/usr/bin/python3", args: ["/data/data/com.termux/files/home/projects/download-triage/rollback.py", "--list"] },
+  "dl-rollback": { id: "dl-rollback", label: "İndirmeleri geri al", compactLabel: "Geri al", category: "İndirmeler", icon: "undo", order: 30, executable: "/data/data/com.termux/files/usr/bin/python3", args: ["/data/data/com.termux/files/home/projects/download-triage/rollback.py"] }
 });
 const ACTIONS_MANIFEST = "/data/data/com.termux/files/home/.config/terminal-hub/actions.json";
 const SCHEDULES_REGISTRY = "/data/data/com.termux/files/home/.config/terminal-hub/schedules.json";
@@ -50,7 +55,10 @@ function normalizeAction(raw) {
   };
 }
 function getActions() {
-  if (!fs.existsSync(ACTIONS_MANIFEST)) return BUILTIN_ACTIONS;
+  const normalizedBuiltins = Object.fromEntries(
+    Object.entries(BUILTIN_ACTIONS).map(([id, act]) => [id, normalizeAction(act) || act])
+  );
+  if (!fs.existsSync(ACTIONS_MANIFEST)) return normalizedBuiltins;
   try {
     const manifest = JSON.parse(fs.readFileSync(ACTIONS_MANIFEST, "utf8"));
     if (Array.isArray(manifest.actions)) {
@@ -59,12 +67,12 @@ function getActions() {
       const entries = configured.filter(action => !enabled || enabled.has(action.id));
       return Object.fromEntries(entries.map(action => [action.id, action]));
     }
-    if (!Array.isArray(manifest.enabled)) return BUILTIN_ACTIONS;
+    if (!Array.isArray(manifest.enabled)) return normalizedBuiltins;
     const enabled = new Set(manifest.enabled.filter(id => typeof id === "string"));
-    return Object.fromEntries(Object.entries(BUILTIN_ACTIONS).filter(([id]) => enabled.has(id)));
+    return Object.fromEntries(Object.entries(normalizedBuiltins).filter(([id]) => enabled.has(id)));
   } catch (err) {
     console.error("[ACTIONS] Invalid manifest; using built-in registry:", err.message);
-    return BUILTIN_ACTIONS;
+    return normalizedBuiltins;
   }
 }
 
@@ -1971,15 +1979,43 @@ const server = http.createServer(async (req, res) => {
       if (!action) { res.writeHead(404, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Bilinmeyen action" })); return; }
       if (runningActions.size > 0) { res.writeHead(409, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Başka bir action çalışıyor" })); return; }
       const actionId = crypto.randomUUID();
-      const child = spawn(action.executable, action.args, { cwd: "/data/data/com.termux/files/home", env: { ...process.env, HOME: "/data/data/com.termux/files/home" }, shell: false });
+      let child;
+      try {
+        child = spawn(action.executable, action.args, { cwd: "/data/data/com.termux/files/home", env: { ...process.env, HOME: "/data/data/com.termux/files/home" }, shell: false });
+      } catch (err) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Action başlatılamadı: " + err.message }));
+        return;
+      }
       runningActions.set(actionId, child);
-      const emitLines = (stream, channel) => stream.on("data", chunk => String(chunk).split(/\r?\n/).filter(Boolean).forEach(line => broadcastSSE("action_output", { actionId, id: action.id, stream: channel, line })));
-      emitLines(child.stdout, "stdout"); emitLines(child.stderr, "stderr");
-      const timeout = setTimeout(() => { if (runningActions.has(actionId)) child.kill("SIGTERM"); }, ACTION_TIMEOUT_MS);
+      let finished = false;
+      const cleanup = (exitCode, errLine) => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timeout);
+        runningActions.delete(actionId);
+        if (errLine) {
+          broadcastSSE("action_output", { actionId, id: action.id, stream: "stderr", line: errLine });
+        }
+        broadcastSSE("action_finished", { actionId, id: action.id, exitCode: exitCode !== undefined && exitCode !== null ? exitCode : -1 });
+      };
+      const emitLines = (stream, channel) => {
+        if (!stream) return;
+        stream.on("data", chunk => String(chunk).split(/\r?\n/).filter(Boolean).forEach(line => broadcastSSE("action_output", { actionId, id: action.id, stream: channel, line })));
+      };
+      emitLines(child.stdout, "stdout");
+      emitLines(child.stderr, "stderr");
+      const timeout = setTimeout(() => {
+        if (runningActions.has(actionId)) {
+          try { child.kill("SIGTERM"); } catch (e) {}
+          cleanup(-1, "Zaman aşımı (120s)");
+        }
+      }, ACTION_TIMEOUT_MS);
       broadcastSSE("action_started", { actionId, id: action.id, pid: child.pid });
-      child.on("error", err => broadcastSSE("action_output", { actionId, id: action.id, stream: "stderr", line: err.message }));
-      child.on("close", exitCode => { clearTimeout(timeout); runningActions.delete(actionId); broadcastSSE("action_finished", { actionId, id: action.id, exitCode }); });
-      res.writeHead(202, { "Content-Type": "application/json" }); res.end(JSON.stringify({ status: "started", actionId, id: action.id, pid: child.pid }));
+      child.on("error", err => cleanup(-1, err.message));
+      child.on("close", exitCode => cleanup(exitCode));
+      res.writeHead(202, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "started", actionId, id: action.id, pid: child.pid }));
     });
     return;
   }
