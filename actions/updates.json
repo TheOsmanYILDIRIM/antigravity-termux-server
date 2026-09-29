@@ -10,7 +10,8 @@
       "executable": "/data/data/com.termux/files/usr/bin/bash",
       "args": [
         "/data/data/com.termux/files/home/antigravity-termux-server/bin/agy-update"
-      ]
+      ],
+      "alwaysEnabled": true
     }
   ]
 }
