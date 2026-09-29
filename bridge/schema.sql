@@ -254,7 +254,7 @@ begin
       message = '{"message":"Missing bridge key"}',
       detail = '{"status":403,"status_text":"Forbidden"}';
   end if;
-  supplied_hash := encode(digest(supplied, 'sha256'), 'hex');
+  supplied_hash := encode(sha256(convert_to(supplied, 'utf8')), 'hex');
   select exists(
     select 1 from private.bridge_client_keys
     where enabled = true and secret_sha256 = supplied_hash
