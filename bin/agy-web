@@ -50,6 +50,11 @@ case "$1" in
     "$0" start
     ;;
 
+  update)
+    shift
+    exec bash "$DIR/bin/agy-update" "$@"
+    ;;
+
   status)
     if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
       echo "🟢 Durum: ÇALIŞIYOR (tmux session: $SESSION_NAME)"
