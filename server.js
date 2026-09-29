@@ -3444,8 +3444,28 @@ const server = http.createServer(async (req, res) => {
                     }
 
                     if (this.currentBotMessage) {
-                      if (resObj && resObj.response && (!this.currentBotMessage.content || this.currentBotMessage.content.trim().length === 0)) {
-                        this.currentBotMessage.content = resObj.response;
+                      const resultTextCandidates = [
+                        typeof resObj === "string" ? resObj : "",
+                        resObj && typeof resObj.response === "string" ? resObj.response : "",
+                        resObj && typeof resObj.text === "string" ? resObj.text : "",
+                        resObj && typeof resObj.content === "string" ? resObj.content : "",
+                        resObj && typeof resObj.output === "string" ? resObj.output : "",
+                        resObj && typeof resObj.final_response === "string" ? resObj.final_response : "",
+                        resObj && resObj.message && typeof resObj.message.content === "string" ? resObj.message.content : ""
+                      ];
+                      const resultText = resultTextCandidates.find(v => v && v.trim()) || "";
+                      if (resultText && (!this.currentBotMessage.content || this.currentBotMessage.content.trim().length === 0)) {
+                        this.currentBotMessage.content = resultText;
+                      }
+
+                      if ((!this.currentBotMessage.content || this.currentBotMessage.content.trim().length === 0) && this.activeConvId) {
+                        try {
+                          const recovered = await loadBrainConversation(this.activeConvId);
+                          const recoveredBot = recovered && Array.isArray(recovered.messages)
+                            ? [...recovered.messages].reverse().find(m => m && m.role === "bot" && typeof m.content === "string" && m.content.trim())
+                            : null;
+                          if (recoveredBot) this.currentBotMessage.content = recoveredBot.content;
+                        } catch (e) {}
                       }
 
                       if (resObj && resObj.usage) {
