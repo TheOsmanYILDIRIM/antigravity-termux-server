@@ -1,7 +1,7 @@
 ---
 name: chatgpt-agy-subagent
-description: ChatGPT operator skill for delegating Termux work to AGY CLI through the dedicated antigravity-bridge.
-version: 1.0
+description: ChatGPT operator skill for delegating Termux work to one or more AGY CLI subagents through the dedicated antigravity-bridge.
+version: 1.3
 ---
 
 # ChatGPT → AGY CLI Subagent Skill
@@ -308,15 +308,12 @@ Behavior:
 - use task/subagent state when helpful;
 - return the final outcome, not just launch confirmation.
 
-### Mode G — Continuation / persistent context
+### Mode G — Fresh conversation vs continuation decision rules
 
-When a new user turn continues the same AGY-local investigation or project context, prefer a new bridge job with the prior AGY `conversationId`.
-
-This preserves local conversational context and is usually faster than creating a new AGY conversation.
-
-Continuation is a new logical job and therefore gets a new `job_id`.
-
-Do not confuse continuation with retrying the same bridge job.
+- **Fresh conversation (preferred default for independent tasks):** Use a fresh job (without `conversationId`) for independent microtasks, parallel subtasks, distinct investigations, or to maintain context-drift hygiene and clean token limits.
+- **Continuation (`conversationId`):** Use continuation ONLY when prior AGY conversational history, uncommitted scratchpad state, or incremental multi-turn context materially matters to the next step.
+- Continuation is a new logical job and therefore gets a new `job_id`, carrying the prior `conversationId`.
+- Do not confuse continuation with retrying the same bridge job.
 
 ### Mode H — Recovery & Interruption Handling
 
@@ -346,33 +343,40 @@ Behavior:
 
 Never invent model/effort compatibility.
 
-Important proven case:
+Known model identifiers for Gemini 3.7 Flash include:
+- `gemini-3.7-flash-low`
+- `gemini-3.7-flash-medium`
+- `gemini-3.7-flash-high`
+
+These identifiers directly encode the reasoning/thinking level. Do not add a separate or conflicting `effort` parameter when using them unless explicitly known to be compatible with AGY CLI.
+
+Important proven negative case:
 
 ```text
 --model gemini-3.8-flash-medium --effort low
 ```
 
-is invalid in the currently tested AGY CLI and returns a model-selection error.
+(or `--model gemini-3.7-flash-medium --effort low`) is invalid in the AGY CLI and returns a terminal model-selection error.
 
 Therefore:
 
 1. Prefer omitting `effort` unless a compatible combination is known.
-2. If the model identifier already encodes a reasoning tier, do not add a contradictory `effort`.
+2. If the model identifier already encodes a reasoning tier (such as `gemini-3.7-flash-medium`), do not add a separate `effort`.
 3. If exact model/effort control matters, query the live AGY model capability list before selecting.
 4. Treat an AGY model-selection error as a real terminal error, not a final-response-capture failure.
 
 Suggested operational depth:
 
-- quick/local lookup: use the default model behavior;
-- normal repository work: default or known medium-equivalent model;
-- hard debugging/architecture: known higher-reasoning model/tier;
+- quick/local lookup: default model or `gemini-3.7-flash-low`;
+- normal repository work: default or known medium-equivalent model (`gemini-3.7-flash-medium`);
+- hard debugging/architecture: known higher-reasoning model/tier (`gemini-3.7-flash-high`);
 - never force effort merely for consistency.
 
 ---
 
 ## 6. Job creation contract
 
-One logical delegated task equals one bridge job ID.
+One logical delegated task equals one bridge job ID. Note that one logical task = one job ID does **not** mean only one job total; ChatGPT may enqueue multiple distinct top-level jobs (each with its own `job_id`) for independent parallel or sequential subtasks.
 
 Use a stable unique `idempotency_key`.
 
@@ -610,32 +614,64 @@ For CPU-heavy work on Termux, preserve the repository's thermal conventions wher
 
 ## 12. Top-Level Parallel Jobs vs Internal AGY Subagents
 
-The bridge supports two levels of concurrency:
+The bridge supports two distinct levels of concurrency:
 
 ### 12.1 Top-Level Parallel Jobs (ChatGPT → Bridge)
-ChatGPT can enqueue multiple independent top-level AGY jobs simultaneously. The Termux relay processes up to `ANTIGRAVITY_BRIDGE_CONCURRENCY` (default 3) jobs in parallel.
-- Each job maintains a distinct `job_id`, atomic lease/claim token, independent heartbeat, and result row.
-- Safe parallel use cases: Independent read-only searches, multi-repo investigations, or disjoint tasks.
-- **Strict safety rule:** Do NOT execute parallel top-level jobs that write to or edit the same directory, files, or git branch simultaneously. When jobs share mutable state, sequence them sequentially or continue within the same conversation.
-- **Relay self-restart rule:** A bridge worker / AGY execution must not synchronously restart its own bridge relay while holding an active job. Self-restart must be orchestrated out-of-band or after terminal result persistence.
+
+ChatGPT can enqueue multiple independent top-level AGY jobs simultaneously into `public.agent_jobs`. The Termux relay processes up to `ANTIGRAVITY_BRIDGE_CONCURRENCY` (default `3`, range 1–10) jobs in parallel.
+
+- **Isolation & Correlation:** Each top-level job maintains a distinct `job_id`, atomic lease/claim token (`FOR UPDATE SKIP LOCKED`), independent heartbeat, and result row in `agent_results`.
+- **Fan-out-first, wait-second:** For genuinely independent top-level jobs, enqueue all candidate jobs first (fan-out), then wait on their results sequentially/iteratively via `private.wait_agent_job`.
+- **Parallel-safe candidates:**
+  - Independent read-only searches and repository inspections.
+  - Operations across different repositories.
+  - Non-overlapping isolated git worktrees or disjoint directory paths.
+- **Parallel-unsafe constraint (Strict Safety Rule):** Do NOT execute parallel top-level jobs that write to, edit, or modify files or git branches within the same working tree by default. When jobs share mutable state, sequence them sequentially or continue within the same conversation.
+- **Relay self-restart lifecycle constraint:** A bridge worker / AGY execution must not synchronously restart its own bridge relay while holding an active job. Doing so drops the worker lease and terminates in-flight execution; self-restarts must be orchestrated out-of-band or after terminal result persistence.
 
 ### 12.2 Internal AGY Subagents (AGY → AGY)
-AGY itself may spawn child subagents (`invoke_subagent`) when a single delegated task naturally decomposes into independent workstreams, for example:
 
-- inspect two independent repositories;
-- compare implementation vs tests;
-- investigate separate failing modules;
+A single parent AGY job may internally spawn child subagents (`invoke_subagent`) when a single delegated task naturally decomposes into independent workstreams, for example:
+
+- inspecting two independent repositories;
+- comparing implementation against test suites;
+- investigating separate failing modules;
 - parallel static analysis of unrelated components.
 
-Avoid AGY subagents for trivial lookups or a single-file fix.
+Avoid AGY subagents for trivial lookups or single-file fixes.
 
-ChatGPT should delegate the goal and constraints, not micromanage every subagent step.
-
-The parent AGY turn remains responsible for waiting for subagents and returning one final consolidated result.
+ChatGPT delegates the overall goal and constraints without micromanaging every subagent step. The parent AGY turn remains responsible for waiting for its subagents and returning one final consolidated result.
 
 ---
 
-## 13. ChatGPT response behavior after delegation
+## 13. Practical ChatGPT orchestration rules
+
+When coordinating with AGY through the bridge, ChatGPT should structure execution patterns according to task dependency:
+
+1. **Single Task Pattern:**
+   - Enqueue 1 job in `agent_jobs` (`idempotency_key` = unique task hash).
+   - Call bounded wait `private.wait_agent_job(job_id, p_timeout_seconds => 20-30)`.
+   - On `ready = true`, consume `response_text` and answer the user.
+
+2. **Dependent Sequential Pattern:**
+   - Enqueue Job A -> Bounded wait for Job A -> Evaluate outcome.
+   - If subsequent step requires prior conversational/scratchpad state, enqueue Job B with `conversationId` (continuation).
+   - If subsequent step is independent, enqueue Job B as a fresh job (no `conversationId`).
+   - Bounded wait for Job B -> Consolidate final answer.
+
+3. **Independent Multi-Task Pattern (Fan-Out / Fan-In):**
+   - Identify parallel-safe tasks (e.g., read-only audits across multiple modules or distinct repos).
+   - **Fan-Out First:** Enqueue all independent jobs (up to `ANTIGRAVITY_BRIDGE_CONCURRENCY`, default 3) in rapid succession.
+   - **Wait Second:** Call `private.wait_agent_job` sequentially for each job ID until all are resolved or timed out.
+   - Aggregate all `response_text` payloads into a single coherent user response.
+
+4. **Verification Pattern:**
+   - Following any implementation task (Mode D), execute a focused verification (Mode B) or long-running test validation (Mode F) job before claiming completion.
+   - If tests fail, diagnose using root-cause investigation (Mode E) instead of speculative blind patching.
+
+---
+
+## 14. ChatGPT response behavior after delegation
 
 After AGY succeeds:
 
@@ -654,7 +690,7 @@ After AGY fails:
 
 ---
 
-## 14. Proven baseline
+## 15. Proven baseline
 
 The current bridge has been verified with:
 
