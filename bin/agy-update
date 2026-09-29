@@ -60,6 +60,8 @@ log "🎯 Uzak: ${REMOTE_HEAD:0:12}"
 validate_checkout() {
   log "🧪 Syntax ve manifest kontrolleri..."
   node --check server.js >/dev/null 2>&1 || return 1
+  node --check lib/actions.js >/dev/null 2>&1 || return 1
+  node --check scripts/run-action.js >/dev/null 2>&1 || return 1
   if [ -f bridge/relay.js ]; then
     node --check bridge/relay.js >/dev/null 2>&1 || return 1
   fi
@@ -70,6 +72,7 @@ validate_checkout() {
   fi
   bash -n bin/agy-web >/dev/null 2>&1 || return 1
   bash -n bin/agy-update >/dev/null 2>&1 || return 1
+  bash -n bin/agy-action-run >/dev/null 2>&1 || return 1
   return 0
 }
 
@@ -99,7 +102,7 @@ NEW_HEAD="$(git rev-parse HEAD)"
 log "📦 Yeni commit: ${NEW_HEAD:0:12}"
 
 # Files created through GitHub Contents API may not retain executable mode.
-chmod +x bin/agy-web bin/agy-update 2>/dev/null || true
+chmod +x bin/agy-web bin/agy-update bin/agy-action-run 2>/dev/null || true
 [ -f bin/agy-bridge ] && chmod +x bin/agy-bridge 2>/dev/null || true
 
 if ! validate_checkout; then
@@ -112,6 +115,7 @@ fi
 if [ -n "${PREFIX:-}" ] && [ -d "$PREFIX/bin" ]; then
   ln -sf "$REPO_DIR/bin/agy-web" "$PREFIX/bin/agy-web" 2>/dev/null || true
   ln -sf "$REPO_DIR/bin/agy-update" "$PREFIX/bin/agy-update" 2>/dev/null || true
+  ln -sf "$REPO_DIR/bin/agy-action-run" "$PREFIX/bin/agy-action-run" 2>/dev/null || true
   [ -f "$REPO_DIR/bin/agy-bridge" ] && ln -sf "$REPO_DIR/bin/agy-bridge" "$PREFIX/bin/agy-bridge" 2>/dev/null || true
 fi
 
