@@ -3730,7 +3730,23 @@ const server = http.createServer(async (req, res) => {
               }) + "\n";
               this.child.stdin.write(payload);
             } catch (e) {
+              const failedConvId = this.activeConvId;
+              const failedRequestId = this.currentRequestId;
+              if (this.currentBotMessage) {
+                this.currentBotMessage.state = "error";
+              }
               this.cleanup();
+              currentSession.isGenerating = false;
+              broadcastSSE("error", {
+                error: "AGY stdin write failed: " + (e && e.message ? e.message : String(e)),
+                conversationId: failedConvId,
+                requestId: failedRequestId
+              });
+              broadcastSSE("generating_done", {
+                conversationId: failedConvId,
+                isGenerating: false,
+                requestId: failedRequestId
+              });
             }
           }
 
@@ -3771,26 +3787,9 @@ const server = http.createServer(async (req, res) => {
           // Actions are explicit user-invoked shell shortcuts. Never run agy-auth
           // or any other Action implicitly in the chat message critical path.
           const targetId = conversationId || currentSession.conversationId;
-              const existingWorker = targetId ? persistentWorkers.get(targetId) : null;
-              if (existingWorker) {
-                existingWorker.destroy();
-                persistentWorkers.delete(targetId);
-              }
-              broadcastSSE("account_switched", {
-                from: switchRes.from,
-                to: switchRes.to,
-                fromEmail: switchRes.fromEmail,
-                toEmail: switchRes.toEmail,
-                reason: switchRes.reason,
-                conversationId: activeConvId
-              });
-            }
-          } catch (e) {}
-
-          const targetId = conversationId || currentSession.conversationId;
           let worker = targetId ? persistentWorkers.get(targetId) : null;
 
-          // If worker exists but config changed (model/effort/mode), destroy and re-create
+          // If worker exists but config changed (model/effort/mode), destroy and re-create.
           if (worker && (worker.model !== model || worker.effort !== effort || worker.mode !== mode)) {
             worker.destroy();
             worker = null;
@@ -3811,7 +3810,6 @@ const server = http.createServer(async (req, res) => {
 
           worker.sendTurn(fullPromptForAgy, botMessage, requestId);
         }
-
         handleChatExecution();
 
       } catch (err) {
