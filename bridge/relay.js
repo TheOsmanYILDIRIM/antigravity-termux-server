@@ -6,7 +6,8 @@ const os = require("os");
 
 const cfg = {
   supabaseUrl: (process.env.ANTIGRAVITY_BRIDGE_SUPABASE_URL || "").replace(/\/$/, ""),
-  supabaseKey: process.env.ANTIGRAVITY_BRIDGE_SUPABASE_KEY || "",
+  supabaseKey: process.env.ANTIGRAVITY_BRIDGE_PUBLISHABLE_KEY || "",
+  bridgeSecret: process.env.ANTIGRAVITY_BRIDGE_CLIENT_SECRET || "",
   agyUrl: (process.env.ANTIGRAVITY_BASE_URL || "http://127.0.0.1:8080").replace(/\/$/, ""),
   workerId: process.env.ANTIGRAVITY_BRIDGE_WORKER_ID || `termux-${os.hostname() || "android"}`,
   pollMs: envInt("ANTIGRAVITY_BRIDGE_POLL_MS", 3000, 500, 60000),
@@ -15,8 +16,8 @@ const cfg = {
   jobTimeoutMs: envInt("ANTIGRAVITY_BRIDGE_JOB_TIMEOUT_MS", 3900000, 60000, 21600000)
 };
 
-if (!cfg.supabaseUrl || !cfg.supabaseKey) {
-  console.error("Missing ANTIGRAVITY_BRIDGE_SUPABASE_URL / ANTIGRAVITY_BRIDGE_SUPABASE_KEY");
+if (!cfg.supabaseUrl || !cfg.supabaseKey || !cfg.bridgeSecret) {
+  console.error("Missing ANTIGRAVITY_BRIDGE_SUPABASE_URL / ANTIGRAVITY_BRIDGE_PUBLISHABLE_KEY / ANTIGRAVITY_BRIDGE_CLIENT_SECRET");
   process.exit(2);
 }
 
@@ -50,7 +51,7 @@ async function jsonFetch(url, options = {}, timeoutMs = 30000) {
 }
 
 function sbHeaders(extra = {}) {
-  return { apikey: cfg.supabaseKey, Authorization: `Bearer ${cfg.supabaseKey}`, "Content-Type": "application/json", ...extra };
+  return { apikey: cfg.supabaseKey, "x-antigravity-bridge-key": cfg.bridgeSecret, "Content-Type": "application/json", ...extra };
 }
 async function sb(method, path, body = undefined, extra = {}) {
   return jsonFetch(`${cfg.supabaseUrl}${path}`, { method, headers: sbHeaders(extra), body: body === undefined ? undefined : JSON.stringify(body) });
