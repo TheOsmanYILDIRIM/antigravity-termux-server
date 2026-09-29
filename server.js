@@ -3611,21 +3611,13 @@ const server = http.createServer(async (req, res) => {
             if (this.idleTimer) clearTimeout(this.idleTimer);
             activeProcesses.set(this.activeConvId, { child: this.child, botMessage: botMsg, activeConvId: this.activeConvId });
 
-            const doSend = () => {
-              if (!this.child || this.child.exitCode !== null || !this.child.stdin || this.child.stdin.destroyed) {
-                this.start(1);
-                this.initWaiters.push(() => {
-                  this.writePayload(promptText);
-                });
-              } else {
-                this.writePayload(promptText);
-              }
-            };
-
-            if (!this.isReady) {
-              this.initWaiters.push(doSend);
-            } else {
-              doSend();
+            // AGY stream-json input is driver-led: the first user event must be
+            // written to stdin without waiting for an init event.
+            if (!this.child || this.child.exitCode !== null || !this.child.stdin || this.child.stdin.destroyed) {
+              this.start(1);
+            }
+            if (this.child && this.child.exitCode === null && this.child.stdin && !this.child.stdin.destroyed) {
+              this.writePayload(promptText);
             }
           }
 
