@@ -1,0 +1,64 @@
+{
+  "actions": [
+    {
+      "id": "agy-bridge-start",
+      "label": "ChatGPT Bridge başlat",
+      "compactLabel": "ChatGPT Başlat",
+      "category": "ChatGPT Bridge",
+      "icon": "play_arrow",
+      "order": 10,
+      "executable": "/data/data/com.termux/files/usr/bin/agy-bridge",
+      "args": [
+        "start"
+      ]
+    },
+    {
+      "id": "agy-bridge-stop",
+      "label": "ChatGPT Bridge durdur",
+      "compactLabel": "ChatGPT Durdur",
+      "category": "ChatGPT Bridge",
+      "icon": "stop",
+      "order": 20,
+      "executable": "/data/data/com.termux/files/usr/bin/agy-bridge",
+      "args": [
+        "stop"
+      ]
+    },
+    {
+      "id": "agy-bridge-restart",
+      "label": "ChatGPT Bridge yeniden başlat",
+      "compactLabel": "ChatGPT Restart",
+      "category": "ChatGPT Bridge",
+      "icon": "refresh",
+      "order": 30,
+      "executable": "/data/data/com.termux/files/usr/bin/agy-bridge",
+      "args": [
+        "restart"
+      ]
+    },
+    {
+      "id": "agy-bridge-status",
+      "label": "ChatGPT Bridge durumunu göster",
+      "compactLabel": "ChatGPT Durum",
+      "category": "ChatGPT Bridge",
+      "icon": "info",
+      "order": 40,
+      "executable": "/data/data/com.termux/files/usr/bin/agy-bridge",
+      "args": [
+        "status"
+      ]
+    },
+    {
+      "id": "agy-bridge-logs",
+      "label": "ChatGPT Bridge loglarını göster",
+      "compactLabel": "ChatGPT Log",
+      "category": "ChatGPT Bridge",
+      "icon": "receipt_long",
+      "order": 50,
+      "executable": "/data/data/com.termux/files/usr/bin/agy-bridge",
+      "args": [
+        "logs"
+      ]
+    }
+  ]
+}
