@@ -1,0 +1,28 @@
+{
+  "actions": [
+    {
+      "id": "agy-start",
+      "label": "AGY başlat",
+      "compactLabel": "Başlat",
+      "category": "AGY",
+      "icon": "play_arrow",
+      "order": 10,
+      "executable": "/data/data/com.termux/files/usr/bin/bash",
+      "args": [
+        "/data/data/com.termux/files/home/.termux/tasker/agy-web-start.sh"
+      ]
+    },
+    {
+      "id": "agy-stop",
+      "label": "AGY durdur",
+      "compactLabel": "Durdur",
+      "category": "AGY",
+      "icon": "stop",
+      "order": 20,
+      "executable": "/data/data/com.termux/files/usr/bin/bash",
+      "args": [
+        "/data/data/com.termux/files/home/.termux/tasker/agy-web-stop.sh"
+      ]
+    }
+  ]
+}
