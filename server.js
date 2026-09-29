@@ -3459,13 +3459,13 @@ const server = http.createServer(async (req, res) => {
                       }
 
                       if ((!this.currentBotMessage.content || this.currentBotMessage.content.trim().length === 0) && this.activeConvId) {
-                        try {
-                          const recovered = await loadBrainConversation(this.activeConvId);
+                        loadBrainConversation(this.activeConvId).then(recovered => {
+                          if (!this.currentBotMessage || (this.currentBotMessage.content && this.currentBotMessage.content.trim().length > 0)) return;
                           const recoveredBot = recovered && Array.isArray(recovered.messages)
                             ? [...recovered.messages].reverse().find(m => m && m.role === "bot" && typeof m.content === "string" && m.content.trim())
                             : null;
                           if (recoveredBot) this.currentBotMessage.content = recoveredBot.content;
-                        } catch (e) {}
+                        }).catch(() => {});
                       }
 
                       if (resObj && resObj.usage) {
