@@ -1,0 +1,49 @@
+{
+  "actions": [
+    {
+      "id": "dl-clean",
+      "label": "İndirilenleri düzenle (clean)",
+      "compactLabel": "Temizle",
+      "category": "İndirmeler",
+      "icon": "cleaning_services",
+      "order": 5,
+      "executable": "/data/data/com.termux/files/usr/bin/dl-organize",
+      "args": []
+    },
+    {
+      "id": "dl-organize",
+      "label": "İndirilenleri düzenle",
+      "compactLabel": "Düzenle",
+      "category": "İndirmeler",
+      "icon": "cleaning_services",
+      "order": 10,
+      "executable": "/data/data/com.termux/files/usr/bin/dl-organize",
+      "args": []
+    },
+    {
+      "id": "dl-list",
+      "label": "İndirme geri alma listesini göster",
+      "compactLabel": "Listele",
+      "category": "İndirmeler",
+      "icon": "list",
+      "order": 20,
+      "executable": "/data/data/com.termux/files/usr/bin/python3",
+      "args": [
+        "/data/data/com.termux/files/home/projects/download-triage/rollback.py",
+        "--list"
+      ]
+    },
+    {
+      "id": "dl-rollback",
+      "label": "İndirmeleri geri al",
+      "compactLabel": "Geri al",
+      "category": "İndirmeler",
+      "icon": "undo",
+      "order": 30,
+      "executable": "/data/data/com.termux/files/usr/bin/python3",
+      "args": [
+        "/data/data/com.termux/files/home/projects/download-triage/rollback.py"
+      ]
+    }
+  ]
+}
