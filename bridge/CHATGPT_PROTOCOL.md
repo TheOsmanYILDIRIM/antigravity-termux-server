@@ -1,0 +1,151 @@
+# ChatGPT ↔ Antigravity Agent Bridge Protocol
+
+This document is the authoritative application-level contract for ChatGPT jobs sent to the dedicated `antigravity-bridge` Supabase project.
+
+## Scope
+
+This bridge is independent from Avenox Brain / `avenox-bridge`.
+
+Runtime path:
+
+```text
+ChatGPT
+  -> Supabase agent_jobs
+  -> Termux bridge/relay.js
+  -> Antigravity localhost API
+  -> AGY CLI
+  -> AGY tools / subagents / tasks
+  -> agent_results
+  -> ChatGPT
+```
+
+## Job creation
+
+ChatGPT creates exactly one row in `public.agent_jobs` per logical delegated task.
+
+Required request field:
+
+```json
+{
+  "prompt": "Task for AGY"
+}
+```
+
+Supported optional request fields currently consumed by `bridge/relay.js`:
+
+```json
+{
+  "conversationId": "existing AGY conversation id",
+  "model": "model id",
+  "effort": "low|medium|high",
+  "mode": "plan|accept-edits",
+  "useVault": true,
+  "autoCompact": true,
+  "compactThresholdTokens": 80000,
+  "attachments": []
+}
+```
+
+Do not invent extra execution semantics in ChatGPT. Unknown fields may be stored by Postgres but are not part of this contract unless relay code explicitly consumes them.
+
+Use a stable `idempotency_key` for retries of the same logical request. Do not create a replacement job while an existing job is `claimed` or `running`.
+
+## Lifecycle
+
+Authoritative job states:
+
+```text
+pending
+  -> claimed
+  -> running
+  -> completed
+             \-> failed
+             \-> cancelled
+```
+
+- `pending`: available for a relay worker.
+- `claimed`: atomically owned by one relay worker and protected by `claim_token`.
+- `running`: submitted to or being recovered from AGY.
+- `completed`: terminal success. Read `agent_results`.
+- `failed`: terminal failure. Read `agent_jobs.error`.
+- `cancelled`: terminal cancellation.
+
+`worker_id`, `heartbeat_at`, and `lease_expires_at` are relay-owned fields.
+
+## Correlation
+
+The relay sends the Supabase job UUID as Antigravity `requestId`.
+
+Antigravity returns that `requestId` on correlated SSE events. The relay must ignore unrelated global SSE traffic.
+
+Once AGY assigns a conversation, `conversation_id` is the durable continuation/recovery identifier.
+
+## Results
+
+Only `public.agent_results` is the authoritative success payload.
+
+Fields:
+
+- `job_id`: same UUID as `agent_jobs.id`.
+- `conversation_id`: AGY conversation used for continuation/recovery.
+- `response_text`: final AGY response.
+- `bot_message`: normalized final bot message when available.
+- `subagents`: final subagent snapshot.
+- `tasks`: final task snapshot.
+- `created_at`: result write time.
+
+A `done` event in `agent_events` is diagnostic evidence, not by itself proof that the job is completed. Success requires `agent_jobs.status = 'completed'` and a matching `agent_results` row.
+
+## Recovery and duplicate prevention
+
+- A stale `claimed` job that never started may be requeued using the same job ID.
+- A stale `running` job should be recovered via its existing `conversation_id`.
+- If a running job has no recoverable conversation ID, do not blindly replay the prompt. Prefer a terminal failure requiring explicit operator action.
+- ChatGPT must follow the original job ID until terminal state.
+- Never start a second job merely because a poll returned `claimed` or `running`.
+
+## ChatGPT read pattern
+
+For an active job, read only that job ID and its matching result.
+
+Recommended status query shape:
+
+```sql
+select
+  j.id,
+  j.status,
+  j.worker_id,
+  j.conversation_id,
+  j.attempts,
+  j.heartbeat_at,
+  j.lease_expires_at,
+  j.completed_at,
+  j.error,
+  r.response_text,
+  r.subagents,
+  r.tasks
+from public.agent_jobs j
+left join public.agent_results r on r.job_id = j.id
+where j.id = '<job-id>'::uuid;
+```
+
+Do not use a broad queue scan when the active job ID is already known.
+
+## Continuation
+
+To continue the same AGY conversation, create a new logical job whose request includes the prior result's `conversationId`.
+
+A continuation is a new user turn, therefore a new job ID is expected. It must not be confused with retrying the same logical job.
+
+## Security boundary
+
+Termux uses:
+- the Supabase publishable key,
+- a device-local `ANTIGRAVITY_BRIDGE_CLIENT_SECRET`,
+- the `private.bridge_check_request()` pre-request gate.
+
+The raw device secret must remain on Termux. Supabase stores only its SHA-256 hash.
+
+The public completion RPC remains `SECURITY INVOKER`. The narrowly scoped result upsert runs through a helper kept in the non-exposed `private` schema.
+
+Do not expose the service-role or secret key to Termux, Android, prompts, logs, or source control.
