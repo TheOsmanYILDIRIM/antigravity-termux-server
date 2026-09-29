@@ -63,7 +63,9 @@ validate_checkout() {
   if [ -f bridge/relay.js ]; then
     node --check bridge/relay.js >/dev/null 2>&1 || return 1
   fi
-  if [ -f actions.json.example ]; then
+  if [ -f scripts/validate-actions.js ]; then
+    node scripts/validate-actions.js >/dev/null 2>&1 || return 1
+  elif [ -f actions.json.example ]; then
     node -e "JSON.parse(require('fs').readFileSync('actions.json.example','utf8'))" >/dev/null 2>&1 || return 1
   fi
   bash -n bin/agy-web >/dev/null 2>&1 || return 1
