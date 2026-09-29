@@ -1,0 +1,127 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Safe self-updater for Antigravity Termux Server.
+# Updates only by fast-forward, validates the new checkout, and rolls back on failure.
+
+set -u
+
+REPO_DIR="${ANTIGRAVITY_SERVER_DIR:-/data/data/com.termux/files/home/antigravity-termux-server}"
+LOG_FILE="${ANTIGRAVITY_UPDATE_LOG:-/data/data/com.termux/files/home/agy-update.log}"
+RESTART=1
+CHECK_ONLY=0
+
+for arg in "$@"; do
+  case "$arg" in
+    --no-restart) RESTART=0 ;;
+    --check-only) CHECK_ONLY=1; RESTART=0 ;;
+    *)
+      echo "Kullanım: agy-update [--no-restart] [--check-only]"
+      exit 2
+      ;;
+  esac
+done
+
+log() {
+  local msg="[$(date -Iseconds)] $*"
+  echo "$msg"
+  printf '%s\n' "$msg" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+fail() {
+  log "❌ $*"
+  exit 1
+}
+
+[ -d "$REPO_DIR/.git" ] || fail "Git reposu bulunamadı: $REPO_DIR"
+command -v git >/dev/null 2>&1 || fail "git bulunamadı"
+command -v node >/dev/null 2>&1 || fail "node bulunamadı"
+
+cd "$REPO_DIR" || fail "Repo dizinine girilemedi"
+
+BRANCH="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+[ -n "$BRANCH" ] || fail "Detached HEAD durumunda otomatik güncelleme yapılmaz"
+
+# Never overwrite local work. Runtime/cache files should already be ignored.
+if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
+  fail "Yerel değişiklikler var. Güvenlik için güncelleme iptal edildi. Önce commit/stash/temizleme yapın."
+fi
+
+OLD_HEAD="$(git rev-parse HEAD)" || fail "Mevcut commit okunamadı"
+log "🔎 Branch: $BRANCH"
+log "📍 Mevcut: ${OLD_HEAD:0:12}"
+
+log "🌐 Uzak repo kontrol ediliyor..."
+git fetch --prune origin "$BRANCH" >>"$LOG_FILE" 2>&1 || fail "git fetch başarısız"
+
+REMOTE_REF="origin/$BRANCH"
+REMOTE_HEAD="$(git rev-parse "$REMOTE_REF" 2>/dev/null || true)"
+[ -n "$REMOTE_HEAD" ] || fail "Uzak branch bulunamadı: $REMOTE_REF"
+log "🎯 Uzak: ${REMOTE_HEAD:0:12}"
+
+validate_checkout() {
+  log "🧪 Syntax ve manifest kontrolleri..."
+  node --check server.js >/dev/null 2>&1 || return 1
+  if [ -f bridge/relay.js ]; then
+    node --check bridge/relay.js >/dev/null 2>&1 || return 1
+  fi
+  if [ -f actions.json.example ]; then
+    node -e "JSON.parse(require('fs').readFileSync('actions.json.example','utf8'))" >/dev/null 2>&1 || return 1
+  fi
+  bash -n bin/agy-web >/dev/null 2>&1 || return 1
+  bash -n bin/agy-update >/dev/null 2>&1 || return 1
+  return 0
+}
+
+if [ "$CHECK_ONLY" -eq 1 ]; then
+  validate_checkout || fail "Mevcut checkout doğrulaması başarısız"
+  log "✅ Mevcut checkout sağlıklı"
+  exit 0
+fi
+
+if [ "$OLD_HEAD" = "$REMOTE_HEAD" ]; then
+  validate_checkout || fail "Repo güncel ama doğrulama başarısız"
+  log "✅ Zaten güncel"
+  exit 0
+fi
+
+# Require remote to be a descendant of local HEAD. No merge commits, no force/reset.
+if ! git merge-base --is-ancestor "$OLD_HEAD" "$REMOTE_HEAD"; then
+  fail "Uzak branch fast-forward değil. Otomatik güncelleme güvenlik için durduruldu."
+fi
+
+log "⬇️ Fast-forward güncelleme uygulanıyor..."
+if ! git merge --ff-only "$REMOTE_REF" >>"$LOG_FILE" 2>&1; then
+  fail "Fast-forward güncelleme başarısız"
+fi
+
+NEW_HEAD="$(git rev-parse HEAD)"
+log "📦 Yeni commit: ${NEW_HEAD:0:12}"
+
+# Files created through GitHub Contents API may not retain executable mode.
+chmod +x bin/agy-web bin/agy-update 2>/dev/null || true
+[ -f bin/agy-bridge ] && chmod +x bin/agy-bridge 2>/dev/null || true
+
+if ! validate_checkout; then
+  log "⚠️ Yeni sürüm doğrulanamadı; eski commit'e geri dönülüyor"
+  git reset --hard "$OLD_HEAD" >>"$LOG_FILE" 2>&1 || fail "Rollback da başarısız oldu; manuel müdahale gerekli"
+  fail "Güncelleme doğrulaması başarısız, rollback tamamlandı"
+fi
+
+# Keep CLI symlinks current without re-running the full installer.
+if [ -n "${PREFIX:-}" ] && [ -d "$PREFIX/bin" ]; then
+  ln -sf "$REPO_DIR/bin/agy-web" "$PREFIX/bin/agy-web" 2>/dev/null || true
+  ln -sf "$REPO_DIR/bin/agy-update" "$PREFIX/bin/agy-update" 2>/dev/null || true
+  [ -f "$REPO_DIR/bin/agy-bridge" ] && ln -sf "$REPO_DIR/bin/agy-bridge" "$PREFIX/bin/agy-bridge" 2>/dev/null || true
+fi
+
+log "✅ Güncelleme doğrulandı: ${OLD_HEAD:0:12} → ${NEW_HEAD:0:12}"
+
+if [ "$RESTART" -eq 1 ]; then
+  # The updater can be launched by the server itself through Actions.
+  # Exit first so action_finished reaches the UI, then restart from a detached shell.
+  log "🔄 agy-web yeniden başlatma planlandı"
+  nohup bash -c 'sleep 2; bash "$1" restart >>"$2" 2>&1' _ "$REPO_DIR/bin/agy-web" "$LOG_FILE" >/dev/null 2>&1 &
+else
+  log "ℹ️ --no-restart: çalışan servis değiştirilmedi"
+fi
+
+exit 0
