@@ -1,0 +1,17 @@
+{
+  "actions": [
+    {
+      "id": "vault-sync",
+      "label": "Vault senkronize et",
+      "compactLabel": "Senkronize",
+      "category": "Sistem",
+      "icon": "sync",
+      "order": 30,
+      "executable": "/data/data/com.termux/files/usr/bin/python3",
+      "args": [
+        "/data/data/com.termux/files/home/vault/beyin.py",
+        "sync"
+      ]
+    }
+  ]
+}
