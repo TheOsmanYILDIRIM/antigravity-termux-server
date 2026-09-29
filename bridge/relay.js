@@ -51,7 +51,7 @@ async function jsonFetch(url, options = {}, timeoutMs = 30000) {
 }
 
 function sbHeaders(extra = {}) {
-  return { apikey: cfg.supabaseKey, "x-antigravity-bridge-key": cfg.bridgeSecret, "Content-Type": "application/json", ...extra };
+  return { apikey: cfg.supabaseKey, Authorization: `Bearer ${cfg.supabaseKey}`, "x-antigravity-bridge-key": cfg.bridgeSecret, "Content-Type": "application/json", ...extra };
 }
 async function sb(method, path, body = undefined, extra = {}) {
   return jsonFetch(`${cfg.supabaseUrl}${path}`, { method, headers: sbHeaders(extra), body: body === undefined ? undefined : JSON.stringify(body) });
