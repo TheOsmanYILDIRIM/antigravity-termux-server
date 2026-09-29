@@ -2,6 +2,8 @@
 
 This document is the authoritative application-level contract for ChatGPT jobs sent to the dedicated `antigravity-bridge` Supabase project.
 
+ChatGPT-side delegation policy is defined in `skills/chatgpt-agy-subagent/SKILL.md`. That skill defines when ChatGPT should delegate to AGY, the permitted Termux HOME read/search/shell scope, model/effort selection rules, continuation behavior, token-efficiency guidance, and result/error handling.
+
 ## Scope
 
 This bridge is independent from Avenox Brain / `avenox-bridge`.
