@@ -5,101 +5,21 @@ const fs = require("fs");
 const path = require("path");
 const { spawn, exec, execSync } = require("child_process");
 
-// Action definitions live outside server.js.
-// Bundled definitions are loaded from ./actions/*.json. Device-local custom
-// definitions can be added under ~/.config/terminal-hub/actions.d/*.json.
-// ~/.config/terminal-hub/actions.json only controls enable/disable filtering.
+// Action definitions live outside server.js. The shared registry module
+// loads bundled ./actions/*.json files plus device-local actions.d overrides.
+const { createActionRegistry } = require("./lib/actions");
 const ACTIONS_MANIFEST = "/data/data/com.termux/files/home/.config/terminal-hub/actions.json";
 const BUNDLED_ACTIONS_DIR = path.join(__dirname, "actions");
 const USER_ACTIONS_DIR = "/data/data/com.termux/files/home/.config/terminal-hub/actions.d";
 const SCHEDULES_REGISTRY = "/data/data/com.termux/files/home/.config/terminal-hub/schedules.json";
-const ALWAYS_AVAILABLE_ACTION_IDS = new Set(["system-update"]);
-
-function normalizeAction(raw) {
-  if (!raw || typeof raw !== "object" || typeof raw.id !== "string" || !/^[A-Za-z0-9._:-]{1,96}$/.test(raw.id)) return null;
-  if (typeof raw.label !== "string" || typeof raw.executable !== "string" || !path.isAbsolute(raw.executable)) return null;
-  if (!Array.isArray(raw.args) || raw.args.some(arg => typeof arg !== "string")) return null;
-  return {
-    ...raw,
-    args: [...raw.args],
-    category: typeof raw.category === "string" && raw.category.trim() ? raw.category.trim() : "Diğer",
-    compactLabel: typeof raw.compactLabel === "string" && raw.compactLabel.trim() ? raw.compactLabel.trim() : raw.label,
-    icon: typeof raw.icon === "string" ? raw.icon : "terminal",
-    order: Number.isFinite(raw.order) ? raw.order : 0
-  };
-}
-
-function readActionDefinitionsFromDir(directory, sourceName) {
-  const out = [];
-  if (!fs.existsSync(directory)) return out;
-  let files = [];
-  try {
-    files = fs.readdirSync(directory)
-      .filter(name => name.endsWith(".json"))
-      .sort((a, b) => a.localeCompare(b));
-  } catch (err) {
-    console.error(`[ACTIONS] Cannot list ${sourceName} directory:`, err.message);
-    return out;
-  }
-
-  for (const name of files) {
-    const filePath = path.join(directory, name);
-    try {
-      const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
-      const candidates = Array.isArray(parsed)
-        ? parsed
-        : Array.isArray(parsed.actions)
-          ? parsed.actions
-          : [parsed];
-      for (const candidate of candidates) {
-        const action = normalizeAction(candidate);
-        if (action) out.push(action);
-        else console.error(`[ACTIONS] Invalid action definition skipped: ${filePath}`);
-      }
-    } catch (err) {
-      console.error(`[ACTIONS] Invalid JSON skipped: ${filePath}: ${err.message}`);
-    }
-  }
-  return out;
-}
-
-function getActionCatalog() {
-  const catalog = new Map();
-  for (const action of readActionDefinitionsFromDir(BUNDLED_ACTIONS_DIR, "bundled")) {
-    catalog.set(action.id, action);
-  }
-  // Local files intentionally override bundled definitions with the same id.
-  for (const action of readActionDefinitionsFromDir(USER_ACTIONS_DIR, "local")) {
-    catalog.set(action.id, action);
-  }
-  return Object.fromEntries(catalog.entries());
-}
+const actionRegistry = createActionRegistry({
+  bundledDir: BUNDLED_ACTIONS_DIR,
+  userDir: USER_ACTIONS_DIR,
+  manifestPath: ACTIONS_MANIFEST
+});
 
 function getActions() {
-  const catalog = getActionCatalog();
-  if (!fs.existsSync(ACTIONS_MANIFEST)) return catalog;
-
-  try {
-    const manifest = JSON.parse(fs.readFileSync(ACTIONS_MANIFEST, "utf8"));
-
-    // Backward compatibility: legacy external manifest-defined actions are
-    // merged into the catalog, but server.js itself never embeds definitions.
-    if (Array.isArray(manifest.actions)) {
-      for (const raw of manifest.actions) {
-        const action = normalizeAction(raw);
-        if (action) catalog[action.id] = action;
-      }
-    }
-
-    if (!Array.isArray(manifest.enabled)) return catalog;
-    const enabled = new Set(manifest.enabled.filter(id => typeof id === "string"));
-    return Object.fromEntries(
-      Object.entries(catalog).filter(([id]) => enabled.has(id) || ALWAYS_AVAILABLE_ACTION_IDS.has(id))
-    );
-  } catch (err) {
-    console.error("[ACTIONS] Invalid manifest; using discovered catalog:", err.message);
-    return catalog;
-  }
+  return actionRegistry.getActions();
 }
 
 const MANAGED_PROCESS_NAMES = new Set(["agy-web", "codex-web", "opencode-web", "cline-web"]);
@@ -1948,8 +1868,16 @@ const server = http.createServer(async (req, res) => {
       const actionId = input && input.actionId;
       const triggerAt = input && input.triggerAt;
       const id = input && input.id;
-      if (typeof id !== "string" || !/^[A-Za-z0-9._:-]{1,96}$/.test(id) || typeof actionId !== "string" || !getActions()[actionId]) {
-        res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "id ve manifestteki bilinen actionId zorunludur." })); return;
+      const scheduledAction = typeof actionId === "string" ? getActions()[actionId] : null;
+      if (
+        typeof id !== "string" ||
+        !/^[A-Za-z0-9._:-]{1,96}$/.test(id) ||
+        !scheduledAction ||
+        scheduledAction.schedulable !== true
+      ) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "id ve schedulable=true olan etkin actionId zorunludur." }));
+        return;
       }
       if (!Number.isFinite(triggerAt) || triggerAt <= Date.now()) {
         res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "triggerAt gelecekteki Unix timestamp (ms) olmalıdır." })); return;
@@ -1976,7 +1904,12 @@ const server = http.createServer(async (req, res) => {
   if (pathname === "/api/actions" && req.method === "GET") {
     const actions = getActions();
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify({ status: "ok", actions: Object.values(actions).map(({ id, label, compactLabel, category, icon, order }) => ({ id, label, compactLabel, category, icon, order })) }));
+    res.end(JSON.stringify({
+      status: "ok",
+      actions: Object.values(actions).map(({ id, label, compactLabel, category, icon, order, schedulable }) => ({
+        id, label, compactLabel, category, icon, order, schedulable: schedulable === true
+      }))
+    }));
     return;
   }
 
