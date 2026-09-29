@@ -1,0 +1,82 @@
+{
+  "actions": [
+    {
+      "id": "codex-start",
+      "label": "Codex servisini başlat",
+      "compactLabel": "Codex başlat",
+      "category": "Servisler",
+      "icon": "play_arrow",
+      "order": 10,
+      "executable": "/data/data/com.termux/files/usr/bin/bash",
+      "args": [
+        "/data/data/com.termux/files/home/antigravity-termux-server/bin/codex-web",
+        "start"
+      ]
+    },
+    {
+      "id": "codex-stop",
+      "label": "Codex servisini durdur",
+      "compactLabel": "Codex durdur",
+      "category": "Servisler",
+      "icon": "stop",
+      "order": 20,
+      "executable": "/data/data/com.termux/files/usr/bin/bash",
+      "args": [
+        "/data/data/com.termux/files/home/antigravity-termux-server/bin/codex-web",
+        "stop"
+      ]
+    },
+    {
+      "id": "opencode-start",
+      "label": "OpenCode servisini başlat",
+      "compactLabel": "OpenCode başlat",
+      "category": "Servisler",
+      "icon": "play_arrow",
+      "order": 30,
+      "executable": "/data/data/com.termux/files/usr/bin/bash",
+      "args": [
+        "/data/data/com.termux/files/home/antigravity-termux-server/bin/opencode-web",
+        "start"
+      ]
+    },
+    {
+      "id": "opencode-stop",
+      "label": "OpenCode servisini durdur",
+      "compactLabel": "OpenCode durdur",
+      "category": "Servisler",
+      "icon": "stop",
+      "order": 40,
+      "executable": "/data/data/com.termux/files/usr/bin/bash",
+      "args": [
+        "/data/data/com.termux/files/home/antigravity-termux-server/bin/opencode-web",
+        "stop"
+      ]
+    },
+    {
+      "id": "cline-start",
+      "label": "Cline servisini başlat",
+      "compactLabel": "Cline başlat",
+      "category": "Servisler",
+      "icon": "play_arrow",
+      "order": 50,
+      "executable": "/data/data/com.termux/files/usr/bin/bash",
+      "args": [
+        "/data/data/com.termux/files/home/antigravity-termux-server/bin/cline-web",
+        "start"
+      ]
+    },
+    {
+      "id": "cline-stop",
+      "label": "Cline servisini durdur",
+      "compactLabel": "Cline durdur",
+      "category": "Servisler",
+      "icon": "stop",
+      "order": 60,
+      "executable": "/data/data/com.termux/files/usr/bin/bash",
+      "args": [
+        "/data/data/com.termux/files/home/antigravity-termux-server/bin/cline-web",
+        "stop"
+      ]
+    }
+  ]
+}
