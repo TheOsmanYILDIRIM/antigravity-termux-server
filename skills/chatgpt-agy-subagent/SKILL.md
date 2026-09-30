@@ -527,11 +527,28 @@ select private.wait_agent_job(
 );
 ```
 
+#### Response contract:
+- **Non-terminal (`kind = 'progress'`, `terminal = false`, `ready = false`):**
+  - Returned while job is `pending`, `claimed`, or `running`.
+  - Includes `status`, `heartbeat_at`, `conversation_id`, `timed_out` (true if RPC bounded wait window expired), `progress_seq` (monotonic integer matching latest `agent_events.id`, 0 if none), and `progress_text` (short latest event action string or null).
+  - All original fields (`found`, `worker_id`, `attempts`, `lease_expires_at`, `started_at`, `completed_at`, `error`, `response_text`, `bot_message`, `subagents`, `tasks`) are preserved.
+- **Terminal completion (`kind = 'final'`, `terminal = true`, `status = 'completed'`, `ready = true`):**
+  - Returned when job successfully completes with non-empty `response_text` and no error.
+- **Terminal failure/cancellation (`kind = 'final'`, `terminal = true`, `status in ('failed', 'cancelled')`, `ready = true`):**
+  - Returned when job terminated with failure/cancellation. Read `error`.
+- **`timed_out` semantics:**
+  - `timed_out = true` indicates ONLY that the bounded DB RPC wait interval elapsed while the job remains in progress.
+  - It must NEVER be treated as job failure, stall, or permanent timeout.
+  - Callers must key decisions off `kind`, `terminal`, and `status`.
+
 #### Operational rules:
 - **Prefer bounded wait:** After enqueue, prefer `private.wait_agent_job(job_id, 20-30s, 500ms)` rather than repeated `SELECT` status/event polling.
-- **Timeout handling:** If it returns `timed_out = true`, call the SAME wait primitive again for the SAME job ID. Do not create a replacement job.
-- **Terminal success:** If `terminal = true` and `ready = true`, consume `response_text` immediately.
-- **Protocol error handling:** If terminal completed (`terminal = true`) but `ready = false`, treat as a bridge protocol error; inspect `agent_jobs` + `agent_results` once to diagnose.
+- **Key off `kind` / `terminal` / `status`:**
+  1. `kind == 'progress'` (`terminal == false`): Job is running/in-flight. Re-invoke `private.wait_agent_job` for the SAME job ID. Optionally display `progress_text` to the user.
+  2. `kind == 'final'` and `status == 'completed'` and `ready == true`: Consume `response_text` immediately.
+  3. `kind == 'final'` and `status in ('failed', 'cancelled')`: Job failed. Inspect `error` payload.
+  4. `kind == 'final'` and `status == 'completed'` and `ready == false`: Protocol error; inspect `agent_jobs` + `agent_results` once to diagnose.
+- **Timeout handling:** If `kind == 'progress'` and `timed_out == true`, call the SAME wait primitive again for the SAME job ID. Do not create a replacement job.
 - **Debug-only events:** Read `agent_events` ONLY for debugging (failed job, stale heartbeat, repeated timeout, protocol mismatch), NOT for normal waiting.
 - **Interruption snapshot:** If the user interrupts after a delegated job may have completed, first do a zero-time/snapshot wait call (`p_timeout_seconds => 0`) for the existing job before creating any new job.
 - **Continuation:** Preserve `conversation_id` for continuation.
