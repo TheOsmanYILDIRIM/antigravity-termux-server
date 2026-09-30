@@ -175,20 +175,32 @@ function parseSse(block) {
   try { return { name, data: JSON.parse(raw) }; } catch { return { name, data: { raw } }; }
 }
 
-function startHeartbeat(job) {
+function startHeartbeat(job, onOwnershipLost = null) {
   let busy = false;
+  let active = true;
   const t = setInterval(async () => {
-    if (busy || stopping) return;
+    if (!active || busy || stopping) return;
     busy = true;
     try {
-      if (!(await heartbeat(job))) log("WARN", "heartbeat ownership lost", { jobId: job.id });
+      const ok = await heartbeat(job);
+      if (!ok) {
+        log("WARN", "heartbeat ownership lost or terminal state reached", { jobId: job.id });
+        active = false;
+        clearInterval(t);
+        if (typeof onOwnershipLost === "function") {
+          onOwnershipLost();
+        }
+      }
     } catch (e) {
       log("WARN", "heartbeat failed", { jobId: job.id, ...errJson(e) });
     } finally {
       busy = false;
     }
   }, cfg.heartbeatMs);
-  return () => clearInterval(t);
+  return () => {
+    active = false;
+    clearInterval(t);
+  };
 }
 
 function buildChatBody(job) {
@@ -225,14 +237,23 @@ async function collectResult(job, conversationId, doneBot = null) {
 
 async function runJob(job) {
   activeJobIds.add(job.id);
-  const stopHeartbeat = startHeartbeat(job);
+  let ownershipLost = false;
+  let waiter = null;
+  const stopHeartbeat = startHeartbeat(job, () => {
+    ownershipLost = true;
+    if (waiter) {
+      const w = waiter;
+      waiter = null;
+      w({ name: "_ownership_lost" });
+    }
+  });
+
   let conversationId = job.conversation_id || null;
   let doneBot = null;
   let streamedText = "";
   const deadline = Date.now() + cfg.jobTimeoutMs;
 
   const eventQueue = [];
-  let waiter = null;
 
   const unsubscribe = sseHub.subscribe((ev) => {
     if (belongs(ev, job, conversationId)) {
@@ -246,9 +267,14 @@ async function runJob(job) {
     }
   });
 
-  function nextEvent(timeoutMs = 15000) {
+  function nextEvent(timeoutMs = 10000) {
     if (eventQueue.length > 0) return Promise.resolve(eventQueue.shift());
     if (stopping) return Promise.reject(new Error("Relay stopping"));
+    if (ownershipLost) {
+      const e = new Error("Job ownership lost or cancelled");
+      e.code = "JOB_OWNERSHIP_LOST";
+      return Promise.reject(e);
+    }
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         if (waiter === onEv) waiter = null;
@@ -272,13 +298,47 @@ async function runJob(job) {
     await agy("POST", "/api/chat", body, 30000);
 
     while (!stopping && Date.now() < deadline) {
-      let ev;
-      try {
-        ev = await nextEvent(15000);
-      } catch (e) {
-        if (e.code === "SSE_TIMEOUT") continue;
+      if (ownershipLost) {
+        const e = new Error("Job ownership lost or cancelled");
+        e.code = "JOB_OWNERSHIP_LOST";
         throw e;
       }
+
+      let ev;
+      try {
+        ev = await nextEvent(10000);
+      } catch (e) {
+        if (e.code === "SSE_TIMEOUT") {
+          // Watchdog: verify if child process / generation has completed or exited on AGY server
+          if (conversationId) {
+            try {
+              const statusCheck = await agy("GET", `/api/conversations/${encodeURIComponent(conversationId)}`, undefined, 5000);
+              if (statusCheck && statusCheck.isGenerating === false) {
+                const res = await collectResult(job, conversationId, doneBot);
+                if (String(res.responseText || "").trim() && sessionMatches(statusCheck.session, job)) {
+                  doneBot = res.botMessage;
+                  break;
+                } else {
+                  const err = new Error("Child task/process is no longer generating and returned no valid result");
+                  err.code = "CHILD_EXITED_WITHOUT_RESULT";
+                  throw err;
+                }
+              }
+            } catch (err) {
+              if (err.code === "CHILD_EXITED_WITHOUT_RESULT") throw err;
+            }
+          }
+          continue;
+        }
+        throw e;
+      }
+
+      if (ev.name === "_ownership_lost") {
+        const e = new Error("Job ownership lost or cancelled");
+        e.code = "JOB_OWNERSHIP_LOST";
+        throw e;
+      }
+
       if (!belongs(ev, job, conversationId)) continue;
       const d = ev.data || {};
       if (ev.name === "init" && d.conversationId) {
@@ -299,6 +359,20 @@ async function runJob(job) {
         }
         break;
       }
+      if (ev.name === "generating_done") {
+        conversationId = d.conversationId || conversationId;
+        if (conversationId) {
+          const res = await collectResult(job, conversationId, doneBot);
+          if (String(res.responseText || "").trim()) {
+            doneBot = res.botMessage;
+            break;
+          } else {
+            const e = new Error("AGY finished generation without a recoverable final response");
+            e.code = "EMPTY_FINAL_RESPONSE";
+            throw e;
+          }
+        }
+      }
       if (ev.name === "error" || ev.name === "stopped") {
         const e = new Error(d.error || d.message || ev.name);
         e.code = ev.name === "error" ? "AGY_ERROR" : "AGY_STOPPED";
@@ -312,6 +386,9 @@ async function runJob(job) {
       throw e;
     }
 
+    // Stop heartbeat immediately upon completion before/with terminal RPC
+    stopHeartbeat();
+
     const result = await collectResult(job, conversationId, doneBot);
     if (!String(result.responseText || "").trim()) {
       const e = new Error("AGY completed without a recoverable final response");
@@ -322,8 +399,13 @@ async function runJob(job) {
     await event(job.id, "relay_completed", { conversationId: result.conversationId, responseChars: result.responseText.length, subagents: result.subagents.length, tasks: result.tasks.length });
     log("INFO", "job completed", { jobId: job.id, conversationId: result.conversationId });
   } catch (e) {
+    stopHeartbeat();
     log("ERROR", "job failed", { jobId: job.id, ...errJson(e) });
-    if (conversationId && !["AGY_ERROR", "AGY_STOPPED", "JOB_TIMEOUT"].includes(e.code)) {
+    if (e.code === "JOB_OWNERSHIP_LOST") {
+      log("INFO", "job ownership lost or cancelled, skipping terminal failure write", { jobId: job.id });
+      return;
+    }
+    if (conversationId && !["AGY_ERROR", "AGY_STOPPED", "JOB_TIMEOUT", "EMPTY_FINAL_RESPONSE", "CHILD_EXITED_WITHOUT_RESULT"].includes(e.code)) {
       try {
         await recoverRunning(job, conversationId, deadline);
         return;
@@ -349,11 +431,20 @@ function sessionMatches(session, job) {
 }
 
 async function recoverRunning(job, conversationId, deadline = Date.now() + cfg.jobTimeoutMs) {
-  const stopHeartbeat = startHeartbeat(job);
+  let ownershipLost = false;
+  const stopHeartbeat = startHeartbeat(job, () => { ownershipLost = true; });
   try {
-    await heartbeat(job);
+    if (!(await heartbeat(job))) {
+      log("WARN", "heartbeat ownership lost during recovery", { jobId: job.id });
+      return;
+    }
     await event(job.id, "recovery_started", { workerId: cfg.workerId, conversationId });
     while (!stopping && Date.now() < deadline) {
+      if (ownershipLost) {
+        const e = new Error("Job ownership lost or cancelled during recovery");
+        e.code = "JOB_OWNERSHIP_LOST";
+        throw e;
+      }
       let loaded;
       try { loaded = await agy("GET", `/api/conversations/${encodeURIComponent(conversationId)}`, undefined, 10000); }
       catch (e) { if (e.status === 404) { await sleep(cfg.pollMs); continue; } throw e; }
@@ -364,6 +455,12 @@ async function recoverRunning(job, conversationId, deadline = Date.now() + cfg.j
         throw e;
       }
       const result = await collectResult(job, conversationId);
+      if (!String(result.responseText || "").trim()) {
+        const e = new Error("AGY recovered conversation has no final response");
+        e.code = "EMPTY_FINAL_RESPONSE";
+        throw e;
+      }
+      stopHeartbeat();
       if (!(await completeJob(job, result))) throw new Error("lost recovered job ownership");
       await event(job.id, "recovery_completed", { conversationId, responseChars: result.responseText.length, subagents: result.subagents.length, tasks: result.tasks.length });
       log("INFO", "recovered job completed", { jobId: job.id, conversationId });

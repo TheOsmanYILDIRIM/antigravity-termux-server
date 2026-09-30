@@ -3768,10 +3768,20 @@ const server = http.createServer(async (req, res) => {
                   currentSession.isGenerating = false;
                 }
                 broadcastSSE("generating_done", { conversationId: this.activeConvId, isGenerating: false, requestId: this.currentRequestId });
-                if (this.currentBotMessage && (!this.currentBotMessage.content || this.currentBotMessage.content.trim().length === 0)) {
-                  this.currentBotMessage.state = "error";
-                  this.currentBotMessage.content = "⚠️ *Üretim süreci sonlandı (exit " + code + ").*";
-                  broadcastSSE("error", { error: this.lastResultError || "Process exited unexpectedly", conversationId: this.activeConvId, requestId: this.currentRequestId });
+                if (this.lastResultStatus !== "SUCCESS") {
+                  if (this.currentBotMessage) {
+                    this.currentBotMessage.state = "error";
+                    if (!this.currentBotMessage.content || this.currentBotMessage.content.trim().length === 0) {
+                      this.currentBotMessage.content = "⚠️ *Üretim süreci sonlandı (exit " + code + ").*";
+                    }
+                  }
+                  broadcastSSE("error", {
+                    error: this.lastResultError || ("Process exited unexpectedly with code " + code),
+                    exitCode: code,
+                    signal: signal,
+                    conversationId: this.activeConvId,
+                    requestId: this.currentRequestId
+                  });
                 }
               }
             });

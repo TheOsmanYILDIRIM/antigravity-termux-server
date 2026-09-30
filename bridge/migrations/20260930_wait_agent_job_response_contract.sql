@@ -178,7 +178,7 @@ begin
         'kind', 'progress',
         'terminal', false,
         'ready', false,
-        'timed_out', true,
+        'timed_out', (v_timeout_seconds > 0),
         'conversation_id', v_conversation_id,
         'response_text', v_response_text,
         'error', v_error,

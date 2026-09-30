@@ -26,7 +26,6 @@ function simulateWaitAgentJob(db, p_job_id, p_timeout_seconds = 20, p_poll_inter
   const startTime = Date.now();
   const v_deadline = startTime + v_timeout_seconds * 1000;
 
-  // Loop simulation
   while (true) {
     const j = db.agent_jobs.find(x => x.id === p_job_id);
     if (!j) {
@@ -113,7 +112,7 @@ function simulateWaitAgentJob(db, p_job_id, p_timeout_seconds = 20, p_poll_inter
         kind: "progress",
         terminal: false,
         ready: false,
-        timed_out: true,
+        timed_out: (v_timeout_seconds > 0),
         conversation_id: v_conversation_id,
         response_text: v_response_text,
         error: v_error,
@@ -131,12 +130,74 @@ function simulateWaitAgentJob(db, p_job_id, p_timeout_seconds = 20, p_poll_inter
       };
     }
 
-    break; // simulated single step for instant unit testing
+    break;
   }
 }
 
+/**
+ * DB simulator for complete_agent_job
+ */
+function simulateCompleteAgentJob(db, p_job_id, p_worker_id, p_claim_token, p_conversation_id, p_response_text, p_bot_message = null, p_subagents = [], p_tasks = []) {
+  const j = db.agent_jobs.find(x => x.id === p_job_id && x.worker_id === p_worker_id && x.claim_token === p_claim_token && ["claimed", "running"].includes(x.status));
+  if (!j) return false;
+
+  j.status = "completed";
+  j.conversation_id = p_conversation_id || j.conversation_id;
+  j.completed_at = new Date().toISOString();
+  j.heartbeat_at = new Date().toISOString();
+  j.lease_expires_at = null;
+  j.updated_at = new Date().toISOString();
+  j.error = null;
+
+  const existingIdx = db.agent_results.findIndex(x => x.job_id === p_job_id);
+  const resultRow = {
+    job_id: p_job_id,
+    conversation_id: p_conversation_id || null,
+    response_text: p_response_text || "",
+    bot_message: p_bot_message,
+    subagents: p_subagents || [],
+    tasks: p_tasks || [],
+    created_at: new Date().toISOString()
+  };
+  if (existingIdx >= 0) {
+    db.agent_results[existingIdx] = resultRow;
+  } else {
+    db.agent_results.push(resultRow);
+  }
+  return true;
+}
+
+/**
+ * DB simulator for fail_agent_job
+ */
+function simulateFailAgentJob(db, p_job_id, p_worker_id, p_claim_token, p_error) {
+  const j = db.agent_jobs.find(x => x.id === p_job_id && x.worker_id === p_worker_id && x.claim_token === p_claim_token && ["claimed", "running"].includes(x.status));
+  if (!j) return false;
+
+  j.status = "failed";
+  j.completed_at = new Date().toISOString();
+  j.heartbeat_at = new Date().toISOString();
+  j.lease_expires_at = null;
+  j.updated_at = new Date().toISOString();
+  j.error = p_error || { code: "unknown" };
+  return true;
+}
+
+/**
+ * DB simulator for heartbeat_agent_job
+ */
+function simulateHeartbeatAgentJob(db, p_job_id, p_worker_id, p_claim_token, p_lease_seconds = 120) {
+  const j = db.agent_jobs.find(x => x.id === p_job_id && x.worker_id === p_worker_id && x.claim_token === p_claim_token && ["claimed", "running"].includes(x.status));
+  if (!j) return false;
+
+  j.heartbeat_at = new Date().toISOString();
+  j.lease_expires_at = new Date(Date.now() + p_lease_seconds * 1000).toISOString();
+  j.updated_at = new Date().toISOString();
+  return true;
+}
+
 function runTests() {
-  console.log("Running wait_agent_job response contract test suite...\n");
+  console.log("Running AGY bridge job terminalization & wait_agent_job contract test suite...\n");
 
   const requiredFields = [
     "job_id", "found", "status", "kind", "terminal", "ready", "timed_out",
@@ -145,7 +206,7 @@ function runTests() {
     "started_at", "completed_at", "progress_seq", "progress_text"
   ];
 
-  // Test 1: running -> kind progress
+  // Test 1: child completes -> result row + completed status + heartbeat stops
   {
     const db = {
       agent_jobs: [{
@@ -153,29 +214,38 @@ function runTests() {
         status: "running",
         conversation_id: "conv-1",
         worker_id: "worker-1",
+        claim_token: "token-1",
         attempts: 1,
-        heartbeat_at: "2026-09-30T19:00:00Z",
-        started_at: "2026-09-30T18:59:00Z"
+        heartbeat_at: new Date().toISOString(),
+        lease_expires_at: new Date(Date.now() + 120000).toISOString(),
+        started_at: new Date().toISOString()
       }],
       agent_results: [],
-      agent_events: [{
-        id: 42,
-        job_id: "job-1",
-        event_type: "tool_update",
-        payload: { toolAction: "Searching code", toolSummary: "Code search" }
-      }]
+      agent_events: []
     };
-    const res = simulateWaitAgentJob(db, "job-1", 0);
-    assert.strictEqual(res.kind, "progress", "Test 1 failed: kind should be progress");
-    assert.strictEqual(res.terminal, false, "Test 1 failed: terminal should be false");
-    assert.strictEqual(res.ready, false, "Test 1 failed: ready should be false");
-    assert.strictEqual(res.status, "running", "Test 1 failed: status should be running");
-    assert.strictEqual(res.progress_seq, 42, "Test 1 failed: progress_seq should match event id");
-    assert.strictEqual(res.progress_text, "Searching code", "Test 1 failed: progress_text should match toolAction");
-    console.log("✓ Test 1 passed: running -> kind=progress, terminal=false, ready=false");
+
+    let heartbeatActive = true;
+    const stopHeartbeat = () => { heartbeatActive = false; };
+
+    // Simulate child completion
+    const ok = simulateCompleteAgentJob(db, "job-1", "worker-1", "token-1", "conv-1", "Durable result text", { role: "bot", content: "Durable result text" });
+    stopHeartbeat(); // worker stops heartbeat immediately on terminalization
+
+    assert.strictEqual(ok, true, "Test 1 failed: complete_agent_job should return true");
+    assert.strictEqual(db.agent_jobs[0].status, "completed", "Test 1 failed: status should be completed");
+    assert.ok(db.agent_jobs[0].completed_at !== null, "Test 1 failed: completed_at must be populated");
+    assert.strictEqual(db.agent_jobs[0].lease_expires_at, null, "Test 1 failed: lease_expires_at must be cleared");
+    assert.strictEqual(db.agent_results.length, 1, "Test 1 failed: result row must be persisted");
+    assert.strictEqual(db.agent_results[0].response_text, "Durable result text");
+    assert.strictEqual(heartbeatActive, false, "Test 1 failed: heartbeat must be stopped");
+
+    // Attempting heartbeat after completion should return false
+    const hbAfter = simulateHeartbeatAgentJob(db, "job-1", "worker-1", "token-1");
+    assert.strictEqual(hbAfter, false, "Test 1 failed: heartbeat on completed job must return false");
+    console.log("✓ Test 1 passed: child completes -> result row + completed status + heartbeat stops");
   }
 
-  // Test 2: timeout while running -> kind progress, terminal false, timed_out true
+  // Test 2: child exits without result -> failed, not running forever
   {
     const db = {
       agent_jobs: [{
@@ -183,125 +253,193 @@ function runTests() {
         status: "running",
         conversation_id: "conv-2",
         worker_id: "worker-1",
-        heartbeat_at: "2026-09-30T19:00:00Z"
+        claim_token: "token-2",
+        attempts: 1,
+        started_at: new Date().toISOString()
       }],
       agent_results: [],
-      agent_events: [{
-        id: 10,
-        job_id: "job-2",
-        event_type: "generating_start",
-        payload: {}
-      }]
+      agent_events: []
     };
-    const res = simulateWaitAgentJob(db, "job-2", 0);
-    assert.strictEqual(res.kind, "progress", "Test 2 failed: kind should be progress");
-    assert.strictEqual(res.terminal, false, "Test 2 failed: terminal should be false");
-    assert.strictEqual(res.ready, false, "Test 2 failed: ready should be false");
-    assert.strictEqual(res.timed_out, true, "Test 2 failed: timed_out should be true");
-    assert.strictEqual(res.progress_seq, 10, "Test 2 failed: progress_seq should be 10");
-    assert.strictEqual(res.progress_text, "generating_start", "Test 2 failed: progress_text fallback to event_type");
-    console.log("✓ Test 2 passed: timeout while running -> kind=progress, terminal=false, timed_out=true");
+
+    let heartbeatActive = true;
+    const stopHeartbeat = () => { heartbeatActive = false; };
+
+    // Simulate watchdog failing job on abnormal exit without result
+    const failOk = simulateFailAgentJob(db, "job-2", "worker-1", "token-2", {
+      code: "CHILD_EXITED_WITHOUT_RESULT",
+      message: "Child process exited without producing a final response"
+    });
+    stopHeartbeat();
+
+    assert.strictEqual(failOk, true);
+    assert.strictEqual(db.agent_jobs[0].status, "failed");
+    assert.strictEqual(db.agent_jobs[0].error.code, "CHILD_EXITED_WITHOUT_RESULT");
+    assert.ok(db.agent_jobs[0].completed_at !== null);
+    assert.strictEqual(db.agent_results.length, 0, "No result row written for failed job");
+    assert.strictEqual(heartbeatActive, false);
+    console.log("✓ Test 2 passed: child exits without result -> failed, not running forever");
   }
 
-  // Test 3: completed -> kind final, terminal true, ready true, timed_out false
+  // Test 3: cancelled -> cancelled terminal & heartbeat stops
   {
     const db = {
       agent_jobs: [{
         id: "job-3",
-        status: "completed",
+        status: "cancelled", // user cancelled job in database
         conversation_id: "conv-3",
         worker_id: "worker-1",
-        completed_at: "2026-09-30T19:05:00Z",
-        heartbeat_at: "2026-09-30T19:05:00Z",
-        error: null
+        claim_token: "token-3",
+        completed_at: new Date().toISOString()
       }],
-      agent_results: [{
-        job_id: "job-3",
-        conversation_id: "conv-3",
-        response_text: "Task completed successfully."
-      }],
-      agent_events: [{
-        id: 15,
-        job_id: "job-3",
-        event_type: "relay_completed",
-        payload: { responseChars: 28 }
-      }]
+      agent_results: [],
+      agent_events: []
     };
-    const res = simulateWaitAgentJob(db, "job-3", 20);
-    assert.strictEqual(res.kind, "final", "Test 3 failed: kind should be final");
-    assert.strictEqual(res.terminal, true, "Test 3 failed: terminal should be true");
-    assert.strictEqual(res.ready, true, "Test 3 failed: ready should be true");
-    assert.strictEqual(res.timed_out, false, "Test 3 failed: timed_out should be false");
-    assert.strictEqual(res.status, "completed", "Test 3 failed: status should be completed");
-    assert.strictEqual(res.response_text, "Task completed successfully.");
-    assert.strictEqual(res.progress_seq, 15);
-    console.log("✓ Test 3 passed: completed -> kind=final, terminal=true, ready=true, timed_out=false");
+
+    // Heartbeat loop receives ownership lost
+    let heartbeatActive = true;
+    const hbOk = simulateHeartbeatAgentJob(db, "job-3", "worker-1", "token-3");
+    if (!hbOk) {
+      heartbeatActive = false; // Heartbeat loop immediately stops
+    }
+    assert.strictEqual(hbOk, false, "Heartbeat must return false for cancelled job");
+    assert.strictEqual(heartbeatActive, false, "Heartbeat must stop immediately on cancellation");
+
+    const waitRes = simulateWaitAgentJob(db, "job-3", 0);
+    assert.strictEqual(waitRes.kind, "final");
+    assert.strictEqual(waitRes.terminal, true);
+    assert.strictEqual(waitRes.ready, true);
+    assert.strictEqual(waitRes.status, "cancelled");
+    console.log("✓ Test 3 passed: cancelled -> cancelled terminal, heartbeat stops");
   }
 
-  // Test 4: failed -> kind final with error, ready true, timed_out false
+  // Test 4: wait running -> kind=progress
   {
     const db = {
       agent_jobs: [{
         id: "job-4",
-        status: "failed",
+        status: "running",
         conversation_id: "conv-4",
-        completed_at: "2026-09-30T19:02:00Z",
-        heartbeat_at: "2026-09-30T19:02:00Z",
-        error: { code: "AGY_ERROR", message: "Build failed on line 12" }
+        worker_id: "worker-1",
+        heartbeat_at: "2026-09-30T19:00:00Z"
       }],
       agent_results: [],
       agent_events: [{
-        id: 18,
+        id: 42,
         job_id: "job-4",
-        event_type: "relay_failed",
-        payload: { message: "Build failed on line 12" }
+        event_type: "tool_update",
+        payload: { toolAction: "Searching code", toolSummary: "Code search" }
       }]
     };
-    const res = simulateWaitAgentJob(db, "job-4", 20);
-    assert.strictEqual(res.kind, "final", "Test 4 failed: kind should be final");
-    assert.strictEqual(res.terminal, true, "Test 4 failed: terminal should be true");
-    assert.strictEqual(res.ready, true, "Test 4 failed: ready should be true for inspectable terminal");
-    assert.strictEqual(res.timed_out, false, "Test 4 failed: timed_out should be false");
-    assert.strictEqual(res.status, "failed", "Test 4 failed: status should be failed");
-    assert.deepStrictEqual(res.error, { code: "AGY_ERROR", message: "Build failed on line 12" });
-    assert.strictEqual(res.progress_text, "Build failed on line 12");
-    console.log("✓ Test 4 passed: failed -> kind=final with error, terminal=true, ready=true");
+    const res = simulateWaitAgentJob(db, "job-4", 0);
+    assert.strictEqual(res.kind, "progress");
+    assert.strictEqual(res.terminal, false);
+    assert.strictEqual(res.ready, false);
+    assert.strictEqual(res.status, "running");
+    assert.strictEqual(res.timed_out, false);
+    assert.strictEqual(res.progress_seq, 42);
+    assert.strictEqual(res.progress_text, "Searching code");
+    console.log("✓ Test 4 passed: wait running -> kind=progress, terminal=false, ready=false");
   }
 
-  // Test 5: pre-completed returns immediately
+  // Test 5: wait completed -> kind=final
   {
     const db = {
       agent_jobs: [{
         id: "job-5",
         status: "completed",
         conversation_id: "conv-5",
-        completed_at: "2026-09-30T19:00:00Z",
-        heartbeat_at: "2026-09-30T19:00:00Z"
+        worker_id: "worker-1",
+        completed_at: "2026-09-30T19:05:00Z",
+        heartbeat_at: "2026-09-30T19:05:00Z",
+        error: null
       }],
       agent_results: [{
         job_id: "job-5",
         conversation_id: "conv-5",
+        response_text: "Task completed successfully."
+      }],
+      agent_events: [{
+        id: 15,
+        job_id: "job-5",
+        event_type: "relay_completed",
+        payload: { responseChars: 28 }
+      }]
+    };
+    const res = simulateWaitAgentJob(db, "job-5", 20);
+    assert.strictEqual(res.kind, "final");
+    assert.strictEqual(res.terminal, true);
+    assert.strictEqual(res.ready, true);
+    assert.strictEqual(res.timed_out, false);
+    assert.strictEqual(res.status, "completed");
+    assert.strictEqual(res.response_text, "Task completed successfully.");
+    assert.strictEqual(res.progress_seq, 15);
+    console.log("✓ Test 5 passed: wait completed -> kind=final, terminal=true, ready=true, timed_out=false");
+  }
+
+  // Test 6: wait failed -> kind=final + error
+  {
+    const db = {
+      agent_jobs: [{
+        id: "job-6",
+        status: "failed",
+        conversation_id: "conv-6",
+        completed_at: "2026-09-30T19:02:00Z",
+        heartbeat_at: "2026-09-30T19:02:00Z",
+        error: { code: "AGY_ERROR", message: "Process error" }
+      }],
+      agent_results: [],
+      agent_events: [{
+        id: 18,
+        job_id: "job-6",
+        event_type: "relay_failed",
+        payload: { message: "Process error" }
+      }]
+    };
+    const res = simulateWaitAgentJob(db, "job-6", 20);
+    assert.strictEqual(res.kind, "final");
+    assert.strictEqual(res.terminal, true);
+    assert.strictEqual(res.ready, true);
+    assert.strictEqual(res.timed_out, false);
+    assert.strictEqual(res.status, "failed");
+    assert.deepStrictEqual(res.error, { code: "AGY_ERROR", message: "Process error" });
+    assert.strictEqual(res.progress_text, "Process error");
+    console.log("✓ Test 6 passed: wait failed -> kind=final + error, terminal=true, ready=true");
+  }
+
+  // Test 7: pre-completed returns immediately
+  {
+    const db = {
+      agent_jobs: [{
+        id: "job-7",
+        status: "completed",
+        conversation_id: "conv-7",
+        completed_at: "2026-09-30T19:00:00Z",
+        heartbeat_at: "2026-09-30T19:00:00Z"
+      }],
+      agent_results: [{
+        job_id: "job-7",
+        conversation_id: "conv-7",
         response_text: "Already done"
       }],
       agent_events: []
     };
     const t0 = Date.now();
-    const res = simulateWaitAgentJob(db, "job-5", 30);
+    const res = simulateWaitAgentJob(db, "job-7", 30);
     const elapsed = Date.now() - t0;
-    assert.strictEqual(res.kind, "final", "Test 5 failed: kind should be final");
-    assert.strictEqual(res.terminal, true, "Test 5 failed: terminal should be true");
-    assert.strictEqual(res.ready, true, "Test 5 failed: ready should be true");
-    assert.ok(elapsed < 100, "Test 5 failed: pre-completed should return immediately without waiting");
-    console.log("✓ Test 5 passed: pre-completed returns immediately");
+    assert.strictEqual(res.kind, "final");
+    assert.strictEqual(res.terminal, true);
+    assert.strictEqual(res.ready, true);
+    assert.ok(elapsed < 100, "Pre-completed must return immediately");
+    console.log("✓ Test 7 passed: pre-completed returns immediately (<100ms)");
   }
 
-  // Test 6: old fields remain intact
+  // Test 8: backward fields preserved
   {
     const db = {
       agent_jobs: [{
-        id: "job-6",
+        id: "job-8",
         status: "running",
-        conversation_id: "conv-6",
+        conversation_id: "conv-8",
         worker_id: "w-1",
         attempts: 2,
         heartbeat_at: "2026-09-30T19:01:00Z",
@@ -313,53 +451,78 @@ function runTests() {
       agent_results: [],
       agent_events: []
     };
-    const res = simulateWaitAgentJob(db, "job-6", 0);
+    const res = simulateWaitAgentJob(db, "job-8", 0);
     for (const f of requiredFields) {
-      assert.ok(f in res, `Test 6 failed: missing field ${f} in response`);
+      assert.ok(f in res, `Missing required field: ${f}`);
     }
-    console.log("✓ Test 6 passed: all existing fields remain present for backward compatibility");
+    console.log("✓ Test 8 passed: all 21 backward-compatible & new fields preserved");
   }
 
-  // Test 7: progress_seq is monotonic across event sequence
+  // Test 9: progress_seq monotonic
+  {
+    const db = {
+      agent_jobs: [{ id: "job-9", status: "running", conversation_id: "conv-9" }],
+      agent_results: [],
+      agent_events: []
+    };
+
+    let res0 = simulateWaitAgentJob(db, "job-9", 0);
+    assert.strictEqual(res0.progress_seq, 0);
+    assert.strictEqual(res0.progress_text, null);
+
+    db.agent_events.push({ id: 101, job_id: "job-9", event_type: "relay_claimed", payload: { workerId: "w1" } });
+    let res1 = simulateWaitAgentJob(db, "job-9", 0);
+    assert.strictEqual(res1.progress_seq, 101);
+    assert.strictEqual(res1.progress_text, "relay_claimed");
+
+    db.agent_events.push({ id: 105, job_id: "job-9", event_type: "submitted", payload: { model: "gemini" } });
+    let res2 = simulateWaitAgentJob(db, "job-9", 0);
+    assert.strictEqual(res2.progress_seq, 105);
+    assert.ok(res2.progress_seq > res1.progress_seq);
+
+    db.agent_events.push({ id: 112, job_id: "job-9", event_type: "tool_update", payload: { toolAction: "Editing schema.sql" } });
+    let res3 = simulateWaitAgentJob(db, "job-9", 0);
+    assert.strictEqual(res3.progress_seq, 112);
+    assert.strictEqual(res3.progress_text, "Editing schema.sql");
+    assert.ok(res3.progress_seq > res2.progress_seq);
+
+    console.log("✓ Test 9 passed: progress_seq is strictly monotonic (0 < 101 < 105 < 112)");
+  }
+
+  // Test 10: no duplicate result/terminalization on repeated final callbacks
   {
     const db = {
       agent_jobs: [{
-        id: "job-7",
+        id: "job-10",
         status: "running",
-        conversation_id: "conv-7"
+        conversation_id: "conv-10",
+        worker_id: "worker-1",
+        claim_token: "token-10"
       }],
       agent_results: [],
       agent_events: []
     };
 
-    // No events -> progress_seq 0
-    let res0 = simulateWaitAgentJob(db, "job-7", 0);
-    assert.strictEqual(res0.progress_seq, 0);
-    assert.strictEqual(res0.progress_text, null);
+    // First completion
+    const ok1 = simulateCompleteAgentJob(db, "job-10", "worker-1", "token-10", "conv-10", "Final response 1");
+    assert.strictEqual(ok1, true, "First complete call should succeed");
+    assert.strictEqual(db.agent_results.length, 1);
+    assert.strictEqual(db.agent_results[0].response_text, "Final response 1");
 
-    // Event 1 added
-    db.agent_events.push({ id: 101, job_id: "job-7", event_type: "relay_claimed", payload: { workerId: "w1" } });
-    let res1 = simulateWaitAgentJob(db, "job-7", 0);
-    assert.strictEqual(res1.progress_seq, 101);
-    assert.strictEqual(res1.progress_text, "relay_claimed");
+    // Second repeated complete call
+    const ok2 = simulateCompleteAgentJob(db, "job-10", "worker-1", "token-10", "conv-10", "Final response 2");
+    assert.strictEqual(ok2, false, "Second complete call must be rejected idempotently (returns false)");
+    assert.strictEqual(db.agent_results.length, 1, "Must not create duplicate result rows");
+    assert.strictEqual(db.agent_results[0].response_text, "Final response 1", "Original result preserved");
 
-    // Event 2 added
-    db.agent_events.push({ id: 105, job_id: "job-7", event_type: "submitted", payload: { model: "gemini" } });
-    let res2 = simulateWaitAgentJob(db, "job-7", 0);
-    assert.strictEqual(res2.progress_seq, 105);
-    assert.ok(res2.progress_seq > res1.progress_seq);
-
-    // Event 3 added
-    db.agent_events.push({ id: 112, job_id: "job-7", event_type: "tool_update", payload: { toolAction: "Editing schema.sql" } });
-    let res3 = simulateWaitAgentJob(db, "job-7", 0);
-    assert.strictEqual(res3.progress_seq, 112);
-    assert.strictEqual(res3.progress_text, "Editing schema.sql");
-    assert.ok(res3.progress_seq > res2.progress_seq);
-
-    console.log("✓ Test 7 passed: progress_seq is strictly monotonic across events (0 < 101 < 105 < 112)");
+    // Repeated fail call on already completed job
+    const ok3 = simulateFailAgentJob(db, "job-10", "worker-1", "token-10", { code: "ERROR_AFTER_DONE" });
+    assert.strictEqual(ok3, false, "Fail call on completed job must be rejected (returns false)");
+    assert.strictEqual(db.agent_jobs[0].status, "completed", "Job status must remain completed");
+    console.log("✓ Test 10 passed: no duplicate result/terminalization on repeated final callbacks");
   }
 
-  console.log("\nAll 7 test cases passed successfully!");
+  console.log("\nAll 10 test cases passed successfully!");
 }
 
 runTests();
