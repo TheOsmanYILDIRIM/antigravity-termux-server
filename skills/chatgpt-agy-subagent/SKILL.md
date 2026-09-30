@@ -317,13 +317,23 @@ Behavior:
 
 ### Mode H — Recovery & Interruption Handling
 
-For an existing `claimed` or `running` job:
+1. **Supabase as Canonical Truth:**
+   Supabase is the single canonical source of truth for all ChatGPT/Avenox tasks and bridge jobs. ChatGPT does not maintain or rely on a separate client-side session file.
 
-- follow the same `job_id`;
-- never create a replacement just because polling/waiting has timed out;
-- if the user interrupts after a delegated job may have completed, first do a zero-time/snapshot wait call (`private.wait_agent_job(job_id, p_timeout_seconds => 0)`) for the existing job before creating any new job;
-- use the bound `conversation_id` for running-job recovery;
-- never blindly replay a running prompt with no durable conversation ID.
+2. **Recovery via Recent Task Journal:**
+   On startup or session recovery, `avenox_bootstrap` returns `recent_task_journal` containing the last 30 compact task/command entries:
+   - Compact metadata & refs only: `id`, `idempotency_key`, `operation`, `status`, `target_ref`, `task_id`, `summary`, `source_refs`, `error_code`, `created_at`, `completed_at`.
+   - Never duplicates heavy source/file payloads or verbose tool traces.
+
+3. **Idempotent Recovery Discipline:**
+   - Before queueing new work, inspect `recent_task_journal` to check whether an equivalent job/task is already pending, claimed, running, or completed.
+   - For an existing `claimed` or `running` job:
+     - follow the same `job_id` / `command_id`;
+     - never create a replacement just because polling/waiting has timed out;
+     - if interrupted or recovering, first perform a zero-time/snapshot wait call (`private.wait_agent_job(job_id, p_timeout_seconds => 0)`) before initiating any new job;
+     - use the bound `conversation_id` for running-job recovery;
+     - never blindly replay an active prompt or running Brain command.
+   - For mutations (task updates, note/source edits), verify the existing task state/revision or source hash before re-submitting.
 
 ### Mode I — Untrusted / safety-sensitive input
 
