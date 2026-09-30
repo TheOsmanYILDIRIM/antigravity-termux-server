@@ -309,7 +309,10 @@ async function runJob(job) {
         ev = await nextEvent(10000);
       } catch (e) {
         if (e.code === "SSE_TIMEOUT") {
-          // Watchdog: verify if child process / generation has completed or exited on AGY server
+          // A quiet SSE interval is not a terminal signal. AGY can transiently report
+          // isGenerating=false while a generation is starting or transitioning.
+          // Treat that state only as an opportunity to recover a durable final result;
+          // never fail a live job solely because one conversation snapshot is inactive.
           if (conversationId) {
             try {
               const statusCheck = await agy("GET", `/api/conversations/${encodeURIComponent(conversationId)}`, undefined, 5000);
@@ -318,14 +321,10 @@ async function runJob(job) {
                 if (String(res.responseText || "").trim() && sessionMatches(statusCheck.session, job)) {
                   doneBot = res.botMessage;
                   break;
-                } else {
-                  const err = new Error("Child task/process is no longer generating and returned no valid result");
-                  err.code = "CHILD_EXITED_WITHOUT_RESULT";
-                  throw err;
                 }
               }
             } catch (err) {
-              if (err.code === "CHILD_EXITED_WITHOUT_RESULT") throw err;
+              log("WARN", "watchdog snapshot check failed", { jobId: job.id, ...errJson(err) });
             }
           }
           continue;
