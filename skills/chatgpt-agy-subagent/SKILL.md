@@ -719,6 +719,7 @@ Interpret progress events / `wait_agent_job` snapshots as follows:
 
 3. **Tool activity**
    - ChatGPT must internally track every new AGY progress snapshot by comparing `progress_seq` with the last seen sequence for the SAME `job_id`.
+   - After the first snapshot, pass that last seen sequence as `p_after_seq` to the 4-argument `private.wait_agent_job` overload. The RPC should only return immediately for a newer event or terminal state; `changed=false` means the long-poll window expired without new activity.
    - The canonical structured fields are:
      - `progress_event_type`
      - `tool_name`
@@ -734,7 +735,7 @@ Interpret progress events / `wait_agent_job` snapshots as follows:
    - Example DONE: `run_command tamamlandı; sıradaki adıma geçti.`
    - If `tool_name` / `tool_state` are null, fall back to `progress_event_type` and then `progress_text`.
    - Do not expose secrets, full command contents, hidden prompts, raw environment dumps, or sensitive paths.
-   - Do not process the same event twice when `progress_seq` has not changed.
+   - Do not process the same event twice when `progress_seq` has not changed. Prefer `changed=false` from cursor-aware wait over repeated snapshots.
    - If many low-value tool events arrive rapidly, coalesce only the user-facing messages; do NOT discard the internal state transitions.
 
 4. **Subagent / task milestones**
