@@ -33,6 +33,9 @@ declare
   v_tasks pg_catalog.jsonb;
   v_progress_seq pg_catalog.bigint;
   v_progress_text pg_catalog.text;
+  v_progress_event_type pg_catalog.text;
+  v_tool_name pg_catalog.text;
+  v_tool_state pg_catalog.text;
 begin
   if p_job_id is null then
     return pg_catalog.jsonb_build_object(
@@ -114,17 +117,28 @@ begin
 
     if v_event.id is not null then
       v_progress_seq := v_event.id;
+      v_progress_event_type := v_event.event_type;
+      v_tool_name := pg_catalog.nullif(v_event.payload->'tool'->>'name', '');
+      v_tool_state := pg_catalog.nullif(v_event.payload->'tool'->>'state', '');
       v_progress_text := pg_catalog.coalesce(
         pg_catalog.nullif(v_event.payload->>'toolAction', ''),
         pg_catalog.nullif(v_event.payload->>'toolSummary', ''),
         pg_catalog.nullif(v_event.payload->>'message', ''),
         pg_catalog.nullif(v_event.payload->>'status', ''),
         pg_catalog.nullif(v_event.payload->>'summary', ''),
+        case
+          when v_tool_name is not null and v_tool_state is not null then v_tool_name || ' ' || v_tool_state
+          when v_tool_name is not null then v_tool_name
+          else null
+        end,
         pg_catalog.nullif(v_event.event_type, '')
       );
     else
       v_progress_seq := 0;
       v_progress_text := null;
+      v_progress_event_type := null;
+      v_tool_name := null;
+      v_tool_state := null;
     end if;
 
     -- Canonical ready evaluation:
@@ -166,7 +180,10 @@ begin
         'started_at', v_job.started_at,
         'completed_at', v_job.completed_at,
         'progress_seq', v_progress_seq,
-        'progress_text', v_progress_text
+        'progress_text', v_progress_text,
+        'progress_event_type', v_progress_event_type,
+        'tool_name', v_tool_name,
+        'tool_state', v_tool_state
       );
     end if;
 
@@ -192,7 +209,10 @@ begin
         'started_at', v_job.started_at,
         'completed_at', v_job.completed_at,
         'progress_seq', v_progress_seq,
-        'progress_text', v_progress_text
+        'progress_text', v_progress_text,
+        'progress_event_type', v_progress_event_type,
+        'tool_name', v_tool_name,
+        'tool_state', v_tool_state
       );
     end if;
 
