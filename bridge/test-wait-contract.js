@@ -1,6 +1,8 @@
 "use strict";
 
 const assert = require("assert");
+const fs = require("fs");
+const path = require("path");
 
 /**
  * Deterministic JS simulator of the PostgreSQL private.wait_agent_job(...) function
@@ -780,7 +782,21 @@ function runTests() {
     console.log("✓ Test 18 passed: relay timing distinguishes server-side long poll from fallback claim");
   }
 
-  console.log("\nAll 18 test cases passed successfully!");
+  // Test 19: SQL portability guard for PostgreSQL aliases/special forms
+  {
+    const sqlFiles = [
+      path.join(__dirname, "migrations", "20261001_request_optimization.sql"),
+      path.join(__dirname, "schema.sql")
+    ];
+    const forbidden = /pg_catalog\.(?:bigint|integer|double\s+precision|coalesce|least|greatest|nullif)\b/i;
+    for (const sqlFile of sqlFiles) {
+      const sql = fs.readFileSync(sqlFile, "utf8");
+      assert.ok(!forbidden.test(sql), `Non-portable pg_catalog alias/special form found in ${path.basename(sqlFile)}`);
+    }
+    console.log("✓ Test 19 passed: SQL portability guard rejects invalid pg_catalog aliases/special forms");
+  }
+
+  console.log("\nAll 19 test cases passed successfully!");
 }
 
 runTests();
