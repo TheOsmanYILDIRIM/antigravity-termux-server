@@ -6,7 +6,7 @@ const assert = require("assert");
  * Deterministic JS simulator of the PostgreSQL private.wait_agent_job(...) function
  * to unit-test all contract invariants and edge cases.
  */
-function simulateWaitAgentJob(db, p_job_id, p_timeout_seconds = 20, p_poll_interval_ms = 500) {
+function simulateWaitAgentJob(db, p_job_id, p_timeout_seconds = 20, p_poll_interval_ms = 500, p_after_seq = null) {
   if (!p_job_id) {
     return {
       error: "job_id_required",
@@ -86,6 +86,35 @@ function simulateWaitAgentJob(db, p_job_id, p_timeout_seconds = 20, p_poll_inter
         terminal: true,
         ready: v_ready,
         timed_out: false,
+        changed: true,
+        conversation_id: v_conversation_id,
+        response_text: v_response_text,
+        error: v_error,
+        bot_message: v_bot_message,
+        subagents: v_subagents,
+        tasks: v_tasks,
+        worker_id: j.worker_id || null,
+        attempts: j.attempts || 0,
+        heartbeat_at: j.heartbeat_at || null,
+        lease_expires_at: j.lease_expires_at || null,
+        started_at: j.started_at || null,
+        completed_at: j.completed_at || null,
+        progress_seq: v_progress_seq,
+        progress_text: v_progress_text
+      };
+    }
+
+    const v_changed = p_after_seq == null || v_progress_seq > p_after_seq;
+    if (v_changed) {
+      return {
+        job_id: j.id,
+        found: true,
+        status: v_status,
+        kind: "progress",
+        terminal: false,
+        ready: false,
+        timed_out: false,
+        changed: true,
         conversation_id: v_conversation_id,
         response_text: v_response_text,
         error: v_error,
@@ -113,6 +142,7 @@ function simulateWaitAgentJob(db, p_job_id, p_timeout_seconds = 20, p_poll_inter
         terminal: false,
         ready: false,
         timed_out: (v_timeout_seconds > 0),
+        changed: false,
         conversation_id: v_conversation_id,
         response_text: v_response_text,
         error: v_error,
@@ -194,6 +224,18 @@ function simulateHeartbeatAgentJob(db, p_job_id, p_worker_id, p_claim_token, p_l
   j.lease_expires_at = new Date(Date.now() + p_lease_seconds * 1000).toISOString();
   j.updated_at = new Date().toISOString();
   return true;
+}
+
+function adaptiveIdlePollMs(idleRounds, rand = () => 0.5) {
+  const n = Math.max(1, Number(idleRounds) || 1);
+  let base;
+  if (n <= 10) base = 3000;
+  else if (n <= 24) base = 5000;
+  else if (n <= 36) base = 10000;
+  else if (n <= 42) base = 30000;
+  else base = 60000;
+  const r = Math.max(0, Math.min(1, Number(rand()) || 0));
+  return Math.round(base * (0.9 + r * 0.2));
 }
 
 function runTests() {
@@ -522,7 +564,36 @@ function runTests() {
     console.log("✓ Test 10 passed: no duplicate result/terminalization on repeated final callbacks");
   }
 
-  console.log("\nAll 10 test cases passed successfully!");
+  // Test 11: cursor-aware wait returns only for newer seq
+  {
+    const db = {
+      agent_jobs: [{ id: "job-11", status: "running", conversation_id: "conv-11" }],
+      agent_results: [],
+      agent_events: [{ id: 200, job_id: "job-11", event_type: "tool_update", payload: { toolAction: "Testing" } }]
+    };
+    const newer = simulateWaitAgentJob(db, "job-11", 0, 500, 199);
+    assert.strictEqual(newer.changed, true);
+    assert.strictEqual(newer.progress_seq, 200);
+    assert.strictEqual(newer.timed_out, false);
+
+    const same = simulateWaitAgentJob(db, "job-11", 0, 500, 200);
+    assert.strictEqual(same.changed, false);
+    assert.strictEqual(same.progress_seq, 200);
+    console.log("✓ Test 11 passed: after_seq suppresses duplicate progress snapshots");
+  }
+
+  // Test 12: adaptive idle polling backs off and resets to fast tier
+  {
+    assert.strictEqual(adaptiveIdlePollMs(1), 3000);
+    assert.strictEqual(adaptiveIdlePollMs(11), 5000);
+    assert.strictEqual(adaptiveIdlePollMs(25), 10000);
+    assert.strictEqual(adaptiveIdlePollMs(37), 30000);
+    assert.strictEqual(adaptiveIdlePollMs(43), 60000);
+    assert.strictEqual(adaptiveIdlePollMs(1), 3000);
+    console.log("✓ Test 12 passed: idle poll backoff 3→5→10→30→60s");
+  }
+
+  console.log("\nAll 12 test cases passed successfully!");
 }
 
 runTests();
