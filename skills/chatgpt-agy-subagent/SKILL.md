@@ -718,13 +718,24 @@ Interpret progress events / `wait_agent_job` snapshots as follows:
    - Do not repeat this message for duplicate `generating_start` events.
 
 3. **Tool activity**
-   - When `progress_seq` advances to a new `tool_update`, surface concise tool progress.
-   - For tool state `ACTIVE`: example `AGY şimdi run_command kullanıyor: testleri çalıştırıyor.`
-   - For tool state `DONE`: example `run_command tamamlandı; sıradaki adıma geçti.`
-   - Prefer the real tool name and a short safe summary from event metadata.
+   - ChatGPT must internally track every new AGY progress snapshot by comparing `progress_seq` with the last seen sequence for the SAME `job_id`.
+   - The canonical structured fields are:
+     - `progress_event_type`
+     - `tool_name`
+     - `tool_state`
+     - `progress_seq`
+     - `progress_text`
+   - When `progress_event_type = "tool_update"`, use `tool_name` + `tool_state` as machine-readable truth about AGY tool activity.
+   - `tool_state = "ACTIVE"` means that tool is currently being used.
+   - `tool_state = "DONE"` means that tool invocation completed.
+   - Track these fields even when no user-visible update is emitted; they inform whether AGY is actively progressing, repeating the same state, or transitioning to another tool.
+   - For user-visible updates, surface concise tool progress only when useful.
+   - Example ACTIVE: `AGY şimdi run_command kullanıyor: testleri çalıştırıyor.`
+   - Example DONE: `run_command tamamlandı; sıradaki adıma geçti.`
+   - If `tool_name` / `tool_state` are null, fall back to `progress_event_type` and then `progress_text`.
    - Do not expose secrets, full command contents, hidden prompts, raw environment dumps, or sensitive paths.
-   - Do not emit duplicate updates when `progress_seq` has not changed.
-   - If many low-value tool events arrive rapidly, coalesce them into one concise update rather than spamming the user.
+   - Do not process the same event twice when `progress_seq` has not changed.
+   - If many low-value tool events arrive rapidly, coalesce only the user-facing messages; do NOT discard the internal state transitions.
 
 4. **Subagent / task milestones**
    - New `subagents_update` or `tasks_update` may be surfaced when they represent a meaningful phase transition.
