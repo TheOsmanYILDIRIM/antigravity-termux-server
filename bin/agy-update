@@ -8,13 +8,15 @@ REPO_DIR="${ANTIGRAVITY_SERVER_DIR:-/data/data/com.termux/files/home/antigravity
 LOG_FILE="${ANTIGRAVITY_UPDATE_LOG:-/data/data/com.termux/files/home/agy-update.log}"
 RESTART=1
 CHECK_ONLY=0
+UPDATE_CLI=1
 
 for arg in "$@"; do
   case "$arg" in
     --no-restart) RESTART=0 ;;
     --check-only) CHECK_ONLY=1; RESTART=0 ;;
+    --skip-cli) UPDATE_CLI=0 ;;
     *)
-      echo "Kullanım: agy-update [--no-restart] [--check-only]"
+      echo "Kullanım: agy-update [--no-restart] [--check-only] [--skip-cli]"
       exit 2
       ;;
   esac
@@ -34,6 +36,38 @@ fail() {
 [ -d "$REPO_DIR/.git" ] || fail "Git reposu bulunamadı: $REPO_DIR"
 command -v git >/dev/null 2>&1 || fail "git bulunamadı"
 command -v node >/dev/null 2>&1 || fail "node bulunamadı"
+
+agy_cli_version() {
+  if ! command -v agy >/dev/null 2>&1; then
+    return 1
+  fi
+  agy --version 2>/dev/null | head -n 1
+}
+
+update_agy_cli() {
+  if [ "$UPDATE_CLI" -ne 1 ]; then
+    log "ℹ️ --skip-cli: AGY CLI güncellemesi atlandı"
+    return 0
+  fi
+
+  if ! command -v agy >/dev/null 2>&1; then
+    fail "AGY CLI (agy) bulunamadı; server/bridge güncellemesi CLI olmadan tamamlanmayacak"
+  fi
+
+  local before after
+  before="$(agy_cli_version || true)"
+  log "🤖 AGY CLI mevcut: ${before:-bilinmiyor}"
+  log "⬆️ AGY CLI güncelleniyor..."
+
+  if ! AGY_AUTO_UPDATE=1 agy update >>"$LOG_FILE" 2>&1; then
+    fail "AGY CLI güncellemesi başarısız; servisler yeniden başlatılmadı"
+  fi
+
+  after="$(agy_cli_version || true)"
+  [ -n "$after" ] || fail "AGY CLI güncelleme sonrası sürüm doğrulanamadı"
+  log "✅ AGY CLI: ${before:-?} → $after"
+}
+
 
 cd "$REPO_DIR" || fail "Repo dizinine girilemedi"
 
@@ -78,13 +112,23 @@ validate_checkout() {
 
 if [ "$CHECK_ONLY" -eq 1 ]; then
   validate_checkout || fail "Mevcut checkout doğrulaması başarısız"
+  CLI_VERSION="$(agy_cli_version || true)"
+  if [ "$UPDATE_CLI" -eq 1 ]; then
+    [ -n "$CLI_VERSION" ] || fail "AGY CLI bulunamadı veya sürümü okunamadı"
+    log "🤖 AGY CLI: $CLI_VERSION"
+  fi
   log "✅ Mevcut checkout sağlıklı"
   exit 0
 fi
 
 if [ "$OLD_HEAD" = "$REMOTE_HEAD" ]; then
   validate_checkout || fail "Repo güncel ama doğrulama başarısız"
-  log "✅ Zaten güncel"
+  log "✅ Server/bridge repo zaten güncel"
+  update_agy_cli
+  if [ "$RESTART" -eq 1 ]; then
+    log "🔄 agy-web + agy-bridge yeniden başlatma planlandı"
+    nohup bash -c 'sleep 2; bash "$1" restart >>"$3" 2>&1; bash "$2" restart >>"$3" 2>&1' _ "$REPO_DIR/bin/agy-web" "$REPO_DIR/bin/agy-bridge" "$LOG_FILE" >/dev/null 2>&1 &
+  fi
   exit 0
 fi
 
@@ -119,13 +163,15 @@ if [ -n "${PREFIX:-}" ] && [ -d "$PREFIX/bin" ]; then
   [ -f "$REPO_DIR/bin/agy-bridge" ] && ln -sf "$REPO_DIR/bin/agy-bridge" "$PREFIX/bin/agy-bridge" 2>/dev/null || true
 fi
 
-log "✅ Güncelleme doğrulandı: ${OLD_HEAD:0:12} → ${NEW_HEAD:0:12}"
+log "✅ Server/bridge güncellemesi doğrulandı: ${OLD_HEAD:0:12} → ${NEW_HEAD:0:12}"
+
+update_agy_cli
 
 if [ "$RESTART" -eq 1 ]; then
   # The updater can be launched by the server itself through Actions.
   # Exit first so action_finished reaches the UI, then restart from a detached shell.
-  log "🔄 agy-web yeniden başlatma planlandı"
-  nohup bash -c 'sleep 2; bash "$1" restart >>"$2" 2>&1' _ "$REPO_DIR/bin/agy-web" "$LOG_FILE" >/dev/null 2>&1 &
+  log "🔄 agy-web + agy-bridge yeniden başlatma planlandı"
+  nohup bash -c 'sleep 2; bash "$1" restart >>"$3" 2>&1; bash "$2" restart >>"$3" 2>&1' _ "$REPO_DIR/bin/agy-web" "$REPO_DIR/bin/agy-bridge" "$LOG_FILE" >/dev/null 2>&1 &
 else
   log "ℹ️ --no-restart: çalışan servis değiştirilmedi"
 fi
