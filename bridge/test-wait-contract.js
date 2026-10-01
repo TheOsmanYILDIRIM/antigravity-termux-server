@@ -238,6 +238,38 @@ function adaptiveIdlePollMs(idleRounds, rand = () => 0.5) {
   return Math.round(base * (0.9 + r * 0.2));
 }
 
+function simulateRecordAgentEvent(db, p_job_id, p_worker_id, p_claim_token, event_type, payload = {}, leaseSeconds = 180) {
+  const j = db.agent_jobs.find(x =>
+    x.id === p_job_id &&
+    x.worker_id === p_worker_id &&
+    x.claim_token === p_claim_token &&
+    ["claimed","running"].includes(x.status)
+  );
+  if (!j) return null;
+  const now = Date.now();
+  j.heartbeat_at = new Date(now).toISOString();
+  j.lease_expires_at = new Date(now + leaseSeconds * 1000).toISOString();
+  j.updated_at = new Date(now).toISOString();
+  const nextId = db.agent_events.reduce((m,e) => Math.max(m,e.id || 0),0) + 1;
+  db.agent_events.push({ id: nextId, job_id:p_job_id, event_type, payload });
+  return nextId;
+}
+
+function simulateClaimWait(db, workerId, leaseSeconds = 180) {
+  const pending = db.agent_jobs
+    .filter(x => x.status === "pending")
+    .sort((a,b) => String(a.created_at || "").localeCompare(String(b.created_at || "")))[0];
+  if (!pending) return null;
+  pending.status = "claimed";
+  pending.worker_id = workerId;
+  pending.claim_token = pending.claim_token || "token-claim";
+  pending.attempts = (pending.attempts || 0) + 1;
+  const now = Date.now();
+  pending.heartbeat_at = new Date(now).toISOString();
+  pending.lease_expires_at = new Date(now + leaseSeconds * 1000).toISOString();
+  return pending;
+}
+
 function runTests() {
   console.log("Running AGY bridge job terminalization & wait_agent_job contract test suite...\n");
 
@@ -593,7 +625,41 @@ function runTests() {
     console.log("✓ Test 12 passed: idle poll backoff 3→5→10→30→60s");
   }
 
-  console.log("\nAll 12 test cases passed successfully!");
+  // Test 13: activity event refreshes heartbeat and lease in same operation
+  {
+    const oldHeartbeat = "2026-10-01T00:00:00.000Z";
+    const db = {
+      agent_jobs: [{ id:"job-13", status:"running", worker_id:"w", claim_token:"t", heartbeat_at:oldHeartbeat }],
+      agent_results: [],
+      agent_events: []
+    };
+    const eventId = simulateRecordAgentEvent(db,"job-13","w","t","tool_update",{tool:{name:"run_command",state:"ACTIVE"}},180);
+    assert.strictEqual(eventId,1);
+    assert.notStrictEqual(db.agent_jobs[0].heartbeat_at,oldHeartbeat);
+    assert.ok(Date.parse(db.agent_jobs[0].lease_expires_at) > Date.parse(db.agent_jobs[0].heartbeat_at));
+    assert.strictEqual(db.agent_events[0].event_type,"tool_update");
+    console.log("✓ Test 13 passed: activity event refreshes heartbeat/lease without separate request");
+  }
+
+  // Test 14: claim wait claims exactly one pending job and empty queue returns null
+  {
+    const db = {
+      agent_jobs: [
+        { id:"job-14a", status:"pending", created_at:"2026-10-01T00:00:00Z", attempts:0 },
+        { id:"job-14b", status:"pending", created_at:"2026-10-01T00:01:00Z", attempts:0 }
+      ]
+    };
+    const first = simulateClaimWait(db,"worker");
+    assert.strictEqual(first.id,"job-14a");
+    assert.strictEqual(first.status,"claimed");
+    const second = simulateClaimWait(db,"worker");
+    assert.strictEqual(second.id,"job-14b");
+    const none = simulateClaimWait(db,"worker");
+    assert.strictEqual(none,null);
+    console.log("✓ Test 14 passed: claim wait preserves one-at-a-time queue semantics");
+  }
+
+  console.log("\nAll 14 test cases passed successfully!");
 }
 
 runTests();
