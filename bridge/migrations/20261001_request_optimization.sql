@@ -97,8 +97,8 @@ begin
     );
   end if;
 
-  v_timeout_seconds := pg_catalog.least(pg_catalog.greatest(pg_catalog.coalesce(p_timeout_seconds, 20), 0), 30);
-  v_poll_interval_ms := pg_catalog.least(pg_catalog.greatest(pg_catalog.coalesce(p_poll_interval_ms, 500), 100), 5000);
+  v_timeout_seconds := least(greatest(coalesce(p_timeout_seconds, 20), 0), 30);
+  v_poll_interval_ms := least(greatest(coalesce(p_poll_interval_ms, 500), 100), 5000);
   v_deadline := pg_catalog.clock_timestamp() + pg_catalog.make_interval(secs => v_timeout_seconds);
   v_sleep_seconds := v_poll_interval_ms::double precision / 1000.0;
 
@@ -146,12 +146,12 @@ begin
 
     v_status := v_job.status;
     v_terminal := v_status in ('completed', 'failed', 'cancelled');
-    v_response_text := pg_catalog.coalesce(v_job.response_text, '');
-    v_conversation_id := pg_catalog.coalesce(pg_catalog.nullif(v_job.result_conversation_id, ''), v_job.job_conversation_id);
+    v_response_text := coalesce(v_job.response_text, '');
+    v_conversation_id := coalesce(nullif(v_job.result_conversation_id, ''), v_job.job_conversation_id);
     v_error := v_job.error;
     v_bot_message := v_job.bot_message;
-    v_subagents := pg_catalog.coalesce(v_job.subagents, '[]'::jsonb);
-    v_tasks := pg_catalog.coalesce(v_job.tasks, '[]'::jsonb);
+    v_subagents := coalesce(v_job.subagents, '[]'::jsonb);
+    v_tasks := coalesce(v_job.tasks, '[]'::jsonb);
 
     select
       e.id,
@@ -166,20 +166,20 @@ begin
     if v_event.id is not null then
       v_progress_seq := v_event.id;
       v_progress_event_type := v_event.event_type;
-      v_tool_name := pg_catalog.nullif(coalesce(v_event.payload->'tool'->>'name', v_event.payload->>'tool_name', v_event.payload->>'toolName'), '');
-      v_tool_state := pg_catalog.nullif(coalesce(v_event.payload->'tool'->>'state', v_event.payload->>'tool_state', v_event.payload->>'toolState'), '');
-      v_progress_text := pg_catalog.coalesce(
-        pg_catalog.nullif(v_event.payload->>'toolAction', ''),
-        pg_catalog.nullif(v_event.payload->>'toolSummary', ''),
-        pg_catalog.nullif(v_event.payload->>'message', ''),
-        pg_catalog.nullif(v_event.payload->>'status', ''),
-        pg_catalog.nullif(v_event.payload->>'summary', ''),
+      v_tool_name := nullif(coalesce(v_event.payload->'tool'->>'name', v_event.payload->>'tool_name', v_event.payload->>'toolName'), '');
+      v_tool_state := nullif(coalesce(v_event.payload->'tool'->>'state', v_event.payload->>'tool_state', v_event.payload->>'toolState'), '');
+      v_progress_text := coalesce(
+        nullif(v_event.payload->>'toolAction', ''),
+        nullif(v_event.payload->>'toolSummary', ''),
+        nullif(v_event.payload->>'message', ''),
+        nullif(v_event.payload->>'status', ''),
+        nullif(v_event.payload->>'summary', ''),
         case
           when v_tool_name is not null and v_tool_state is not null then pg_catalog.concat_ws(' ', v_tool_name, v_tool_state)
           when v_tool_name is not null then v_tool_name
           else null
         end,
-        pg_catalog.nullif(v_event.event_type, '')
+        nullif(v_event.event_type, '')
       );
     else
       v_progress_seq := 0;
