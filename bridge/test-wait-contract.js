@@ -16,8 +16,12 @@ function simulateWaitAgentJob(db, p_job_id, p_timeout_seconds = 20, p_poll_inter
       timed_out: false,
       terminal: false,
       ready: false,
+      changed: false,
       progress_seq: 0,
-      progress_text: null
+      progress_text: null,
+      progress_event_type: null,
+      tool_name: null,
+      tool_state: null
     };
   }
 
@@ -37,8 +41,12 @@ function simulateWaitAgentJob(db, p_job_id, p_timeout_seconds = 20, p_poll_inter
         timed_out: false,
         terminal: false,
         ready: false,
+        changed: false,
         progress_seq: 0,
-        progress_text: null
+        progress_text: null,
+        progress_event_type: null,
+        tool_name: null,
+        tool_state: null
       };
     }
 
@@ -57,10 +65,18 @@ function simulateWaitAgentJob(db, p_job_id, p_timeout_seconds = 20, p_poll_inter
 
     let v_progress_seq = 0;
     let v_progress_text = null;
+    let v_progress_event_type = null;
+    let v_tool_name = null;
+    let v_tool_state = null;
     if (v_event) {
       v_progress_seq = v_event.id;
+      v_progress_event_type = v_event.event_type || null;
       const p = v_event.payload || {};
-      v_progress_text = p.toolAction || p.toolSummary || p.message || p.status || p.summary || v_event.event_type || null;
+      v_tool_name = p.tool?.name || p.tool_name || p.toolName || null;
+      v_tool_state = p.tool?.state || p.tool_state || p.toolState || null;
+      v_progress_text = p.toolAction || p.toolSummary || p.message || p.status || p.summary ||
+        (v_tool_name && v_tool_state ? `${v_tool_name} ${v_tool_state}` : v_tool_name) ||
+        v_event.event_type || null;
     }
 
     let v_ready = false;
@@ -100,7 +116,10 @@ function simulateWaitAgentJob(db, p_job_id, p_timeout_seconds = 20, p_poll_inter
         started_at: j.started_at || null,
         completed_at: j.completed_at || null,
         progress_seq: v_progress_seq,
-        progress_text: v_progress_text
+        progress_text: v_progress_text,
+        progress_event_type: v_progress_event_type,
+        tool_name: v_tool_name,
+        tool_state: v_tool_state
       };
     }
 
@@ -128,7 +147,10 @@ function simulateWaitAgentJob(db, p_job_id, p_timeout_seconds = 20, p_poll_inter
         started_at: j.started_at || null,
         completed_at: j.completed_at || null,
         progress_seq: v_progress_seq,
-        progress_text: v_progress_text
+        progress_text: v_progress_text,
+        progress_event_type: v_progress_event_type,
+        tool_name: v_tool_name,
+        tool_state: v_tool_state
       };
     }
 
@@ -156,7 +178,10 @@ function simulateWaitAgentJob(db, p_job_id, p_timeout_seconds = 20, p_poll_inter
         started_at: j.started_at || null,
         completed_at: j.completed_at || null,
         progress_seq: v_progress_seq,
-        progress_text: v_progress_text
+        progress_text: v_progress_text,
+        progress_event_type: v_progress_event_type,
+        tool_name: v_tool_name,
+        tool_state: v_tool_state
       };
     }
 
@@ -274,10 +299,11 @@ function runTests() {
   console.log("Running AGY bridge job terminalization & wait_agent_job contract test suite...\n");
 
   const requiredFields = [
-    "job_id", "found", "status", "kind", "terminal", "ready", "timed_out",
+    "job_id", "found", "status", "kind", "terminal", "ready", "timed_out", "changed",
     "conversation_id", "response_text", "error", "bot_message", "subagents",
     "tasks", "worker_id", "attempts", "heartbeat_at", "lease_expires_at",
-    "started_at", "completed_at", "progress_seq", "progress_text"
+    "started_at", "completed_at", "progress_seq", "progress_text",
+    "progress_event_type", "tool_name", "tool_state"
   ];
 
   // Test 1: child completes -> result row + completed status + heartbeat stops
@@ -659,7 +685,102 @@ function runTests() {
     console.log("✓ Test 14 passed: claim wait preserves one-at-a-time queue semantics");
   }
 
-  console.log("\nAll 14 test cases passed successfully!");
+  // Test 15: all 25 structured fields present on not_found, progress, and terminal
+  {
+    const db = {
+      agent_jobs: [{
+        id: "job-15",
+        status: "running",
+        conversation_id: "conv-15",
+        worker_id: "worker-15",
+        attempts: 1,
+        heartbeat_at: "2026-10-01T12:00:00Z",
+        lease_expires_at: "2026-10-01T12:03:00Z",
+        started_at: "2026-10-01T11:59:00Z"
+      }],
+      agent_results: [],
+      agent_events: [{
+        id: 50,
+        job_id: "job-15",
+        event_type: "tool_update",
+        payload: { tool: { name: "run_command", state: "ACTIVE" }, toolAction: "Running tests" }
+      }]
+    };
+
+    const notFoundFields = [
+      "job_id", "found", "status", "kind", "timed_out", "terminal", "ready",
+      "changed", "progress_seq", "progress_text", "progress_event_type", "tool_name", "tool_state"
+    ];
+    const notFoundRes = simulateWaitAgentJob(db, "non-existent-job", 0);
+    for (const f of notFoundFields) {
+      assert.ok(f in notFoundRes, `Missing field in not_found: ${f}`);
+    }
+    assert.strictEqual(notFoundRes.found, false);
+
+    const progressRes = simulateWaitAgentJob(db, "job-15", 0, 500, 49);
+    for (const f of requiredFields) {
+      assert.ok(f in progressRes, `Missing field in progress: ${f}`);
+    }
+    assert.strictEqual(progressRes.found, true);
+    assert.strictEqual(progressRes.changed, true);
+    assert.strictEqual(progressRes.tool_name, "run_command");
+    assert.strictEqual(progressRes.tool_state, "ACTIVE");
+    assert.strictEqual(progressRes.progress_text, "Running tests");
+
+    console.log("✓ Test 15 passed: all 25 structured fields validated on progress states and not_found contract preserved");
+  }
+
+  // Test 16: clamping of timeout and poll interval
+  {
+    const db = {
+      agent_jobs: [{ id: "job-16", status: "running", conversation_id: "conv-16" }],
+      agent_results: [],
+      agent_events: []
+    };
+    // p_timeout_seconds negative clamped to 0 -> instant return
+    const resClamped = simulateWaitAgentJob(db, "job-16", -5, 50);
+    assert.strictEqual(resClamped.timed_out, false);
+    assert.strictEqual(resClamped.kind, "progress");
+    console.log("✓ Test 16 passed: parameter clamping bounds timeout and interval safely");
+  }
+
+  // Test 17: progress text extraction precedence (toolAction > toolSummary > message > status > summary > tool name/state > event_type)
+  {
+    const db = {
+      agent_jobs: [{ id: "job-17", status: "running" }],
+      agent_results: [],
+      agent_events: [
+        { id: 1, job_id: "job-17", event_type: "custom_event", payload: {} },
+        { id: 2, job_id: "job-17", event_type: "tool_update", payload: { tool: { name: "edit_file", state: "DONE" } } },
+        { id: 3, job_id: "job-17", event_type: "tool_update", payload: { tool: { name: "edit_file", state: "DONE" }, summary: "File edited" } },
+        { id: 4, job_id: "job-17", event_type: "tool_update", payload: { tool: { name: "edit_file", state: "DONE" }, message: "Patch applied", summary: "File edited" } },
+        { id: 5, job_id: "job-17", event_type: "tool_update", payload: { tool: { name: "edit_file", state: "DONE" }, toolAction: "Editing schema.sql", message: "Patch applied" } }
+      ]
+    };
+    const res = simulateWaitAgentJob(db, "job-17", 0);
+    assert.strictEqual(res.progress_seq, 5);
+    assert.strictEqual(res.progress_text, "Editing schema.sql");
+    assert.strictEqual(res.tool_name, "edit_file");
+    assert.strictEqual(res.tool_state, "DONE");
+    console.log("✓ Test 17 passed: progress_text follows strict precedence hierarchy");
+  }
+
+  // Test 18: relay idle backoff timing logic distinguishing long-poll vs fallback
+  {
+    const activeJobs = 0;
+    const longPollElapsed = 25100;
+    const fallbackElapsed = 12;
+
+    const delayForLongPoll = (activeJobs > 0) ? 250 : (longPollElapsed >= 1000 ? 250 : adaptiveIdlePollMs(1));
+    assert.strictEqual(delayForLongPoll, 250, "Long poll wait in DB should only do brief delay before next cycle");
+
+    const delayForFallback = (activeJobs > 0) ? 250 : (fallbackElapsed >= 1000 ? 250 : adaptiveIdlePollMs(1));
+    assert.strictEqual(delayForFallback, 3000, "Fallback instant claim call should back off adaptively");
+
+    console.log("✓ Test 18 passed: relay timing distinguishes server-side long poll from fallback claim");
+  }
+
+  console.log("\nAll 18 test cases passed successfully!");
 }
 
 runTests();

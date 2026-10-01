@@ -605,13 +605,17 @@ async function main() {
         continue;
       }
 
+      const t0 = Date.now();
       const job = await claimJob();
+      const elapsed = Date.now() - t0;
       if (!job) {
         idleRounds += 1;
         if (activeJobPromises.size > 0) {
           await Promise.race([...activeJobPromises, sleep(250)]);
-        } else {
+        } else if (elapsed >= 1000) {
           await sleep(250);
+        } else {
+          await sleep(adaptiveIdlePollMs(idleRounds));
         }
         continue;
       }

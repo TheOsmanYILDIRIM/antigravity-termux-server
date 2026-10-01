@@ -113,14 +113,23 @@ A `done` event in `agent_events` is diagnostic evidence, not by itself proof tha
 To eliminate high-frequency polling loops and race windows between job completion and subsequent polls, ChatGPT must use the database-side bounded waiting function after enqueue:
 
 ```sql
+-- Initial bounded wait (or 3-arg overload)
 select private.wait_agent_job(
   p_job_id => '<job-id>'::uuid,
   p_timeout_seconds => 20, -- 20-30s bounded wait
   p_poll_interval_ms => 500
 );
+
+-- Cursor-aware progress wait (4-arg overload)
+select private.wait_agent_job(
+  p_job_id => '<job-id>'::uuid,
+  p_after_seq => <last_seen_progress_seq>::bigint,
+  p_timeout_seconds => 20,
+  p_poll_interval_ms => 500
+);
 ```
 
-**Rationale:** Manual high-frequency polling creates needless tool calls and race windows between worker completion and the next ChatGPT poll; database-side bounded waiting closes that gap by holding the connection until terminal state or deadline.
+**Rationale:** Manual high-frequency polling creates needless tool calls and race windows between worker completion and the next ChatGPT poll; database-side bounded waiting closes that gap by holding the connection until terminal state, a new progress event (`progress_seq > p_after_seq`), or deadline.
 
 ### Response contract:
 
@@ -128,32 +137,33 @@ The response unambiguously categorizes non-terminal progress vs terminal results
 
 - **Non-terminal progress (`kind = 'progress'`, `terminal = false`, `ready = false`):**
   - Returned when the job is still `pending`, `claimed`, or `running`.
-  - Includes `job_id`, `status`, `heartbeat_at`, `conversation_id`, `timed_out` (true if the bounded wait expired; false if queried snapshot), `progress_seq` (monotonic integer based on `agent_events.id`), and `progress_text` (short latest action summary string or null).
+  - Includes `job_id`, `status`, `heartbeat_at`, `conversation_id`, `timed_out` (true if the bounded wait expired; false if queried snapshot), `changed` (true if `progress_seq > p_after_seq` or initial fetch; false if long-poll expired with no new events), `progress_seq` (monotonic integer based on `agent_events.id`), `progress_text` (short latest action summary string or null), `progress_event_type`, `tool_name`, `tool_state`.
   - All existing fields (`found`, `worker_id`, `attempts`, `lease_expires_at`, `started_at`, `completed_at`, `error`, `response_text`, `bot_message`, `subagents`, `tasks`) remain present.
 
 - **Terminal completion (`kind = 'final'`, `terminal = true`, `status = 'completed'`, `ready = true`):**
-  - Returned when the job has successfully finished.
-  - Contains `timed_out = false`, `response_text`, `conversation_id`, `completed_at`, `heartbeat_at`, `bot_message`, `subagents`, `tasks`, `progress_seq`, `progress_text`.
+  - Returned immediately when the job has successfully finished.
+  - Contains `timed_out = false`, `changed = true`, `response_text`, `conversation_id`, `completed_at`, `heartbeat_at`, `bot_message`, `subagents`, `tasks`, `progress_seq`, `progress_text`.
 
 - **Terminal failure/cancellation (`kind = 'final'`, `terminal = true`, `status in ('failed', 'cancelled')`, `ready = true`):**
-  - Returned when the job suffered a terminal failure or cancellation.
-  - Contains `timed_out = false`, `error` (diagnostic failure object), `completed_at`, `heartbeat_at`, `conversation_id`, `response_text`, `progress_seq`, `progress_text`.
+  - Returned immediately when the job suffered a terminal failure or cancellation.
+  - Contains `timed_out = false`, `changed = true`, `error` (diagnostic failure object), `completed_at`, `heartbeat_at`, `conversation_id`, `response_text`, `progress_seq`, `progress_text`.
 
-- **`timed_out` semantics:**
-  - `timed_out` means **only** that the bounded database-side RPC wait interval elapsed without the job reaching a terminal state.
-  - It must **never** be treated as proof that the job is stalled, stalled out, or errored.
+- **`timed_out` and `changed` semantics:**
+  - `timed_out`: Means **only** that the bounded database-side RPC wait interval elapsed without the job reaching a terminal state. It must **never** be treated as proof that the job is stalled, stalled out, or errored.
+  - `changed`: Indicates whether new progress occurred (`true`) or whether the wait interval expired at the same sequence (`false`).
   - Callers must key off `kind`, `terminal`, and `status`, rather than treating `timed_out` as a failure.
 
 - **`progress_seq` & `progress_text` semantics:**
   - `progress_seq`: Monotonic integer sequence matching the latest `agent_events.id` for the job (`0` when no events have yet been recorded).
   - `progress_text`: Exact, non-synthetic short status summary extracted from the latest `agent_events` row (`payload->>'toolAction'`, `payload->>'toolSummary'`, `payload->>'message'`, or `event_type`), or `null` if no event text exists.
+  - Structured fields `progress_event_type`, `tool_name`, `tool_state` provide canonical machine-readable progress indicators.
 
 ### Operational rules:
-- **Prefer bounded wait:** After enqueue, prefer `private.wait_agent_job(job_id, 20-30s, 500ms)` rather than repeated `SELECT` status/event polling.
+- **Prefer cursor-aware bounded wait:** After enqueue, call `private.wait_agent_job(job_id, p_timeout_seconds => 20)`. For subsequent wait cycles, pass the last seen `progress_seq` as `p_after_seq` to avoid redundant snapshot processing.
 - **Key off `kind` / `terminal` / `status`:**
-  1. `kind == 'progress'` (`terminal == false`): Job is still executing or queued. Re-invoke `private.wait_agent_job` for the SAME job ID. Optionally surface `progress_text` to the user.
-  2. `kind == 'final'` and `status == 'completed'` and `ready == true`: Job succeeded. Immediately consume `response_text`.
-  3. `kind == 'final'` and `status in ('failed', 'cancelled')`: Job terminated with error. Inspect `error` object.
+  1. `kind == 'progress'` (`terminal == false`): Job is still executing or queued. If `changed == true`, track the new `progress_seq` and optionally surface milestone updates. Re-invoke `private.wait_agent_job(job_id, p_after_seq => last_seq)` for the SAME job ID.
+  2. `kind == 'final'` and `status == 'completed'` and `ready == true`: Job succeeded. Stop polling immediately and consume `response_text`.
+  3. `kind == 'final'` and `status in ('failed', 'cancelled')`: Job terminated with error. Stop polling immediately and inspect `error` object.
   4. `kind == 'final'` and `status == 'completed'` and `ready == false`: Bridge protocol error (e.g. empty response_text); inspect `agent_jobs` + `agent_results` once.
 - **Timeout handling:** If `kind == 'progress'` and `timed_out == true`, call the SAME wait primitive again for the SAME job ID. Do not create a replacement job.
 - **Event reading for debugging only:** Read `agent_events` ONLY for debugging (failed job, stale heartbeat, repeated timeout, protocol mismatch), NOT for normal waiting.
