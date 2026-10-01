@@ -8,37 +8,37 @@
 begin;
 
 create or replace function private.wait_agent_job(
-  p_job_id pg_catalog.uuid,
-  p_timeout_seconds pg_catalog.integer default 20,
-  p_poll_interval_ms pg_catalog.integer default 500
-) returns pg_catalog.jsonb
+  p_job_id uuid,
+  p_timeout_seconds integer default 20,
+  p_poll_interval_ms integer default 500
+) returns jsonb
 language plpgsql
 security invoker
 set search_path = ''
 as $$
 declare
-  v_timeout_seconds pg_catalog.integer;
-  v_poll_interval_ms pg_catalog.integer;
-  v_deadline pg_catalog.timestamptz;
+  v_timeout_seconds integer;
+  v_poll_interval_ms integer;
+  v_deadline timestamptz;
   v_job record;
   v_event record;
-  v_status pg_catalog.text;
-  v_terminal pg_catalog.boolean;
-  v_ready pg_catalog.boolean;
-  v_response_text pg_catalog.text;
-  v_conversation_id pg_catalog.text;
-  v_error pg_catalog.jsonb;
-  v_bot_message pg_catalog.jsonb;
-  v_subagents pg_catalog.jsonb;
-  v_tasks pg_catalog.jsonb;
-  v_progress_seq pg_catalog.bigint;
-  v_progress_text pg_catalog.text;
-  v_progress_event_type pg_catalog.text;
-  v_tool_name pg_catalog.text;
-  v_tool_state pg_catalog.text;
+  v_status text;
+  v_terminal boolean;
+  v_ready boolean;
+  v_response_text text;
+  v_conversation_id text;
+  v_error jsonb;
+  v_bot_message jsonb;
+  v_subagents jsonb;
+  v_tasks jsonb;
+  v_progress_seq bigint;
+  v_progress_text text;
+  v_progress_event_type text;
+  v_tool_name text;
+  v_tool_state text;
 begin
   if p_job_id is null then
-    return pg_catalog.jsonb_build_object(
+    return jsonb_build_object(
       'error', 'job_id_required',
       'found', false,
       'status', null,
@@ -82,7 +82,7 @@ begin
     where j.id = p_job_id;
 
     if not found then
-      return pg_catalog.jsonb_build_object(
+      return jsonb_build_object(
         'job_id', p_job_id,
         'found', false,
         'status', null,
@@ -101,8 +101,8 @@ begin
     v_conversation_id := pg_catalog.coalesce(pg_catalog.nullif(v_job.result_conversation_id, ''), v_job.job_conversation_id);
     v_error := v_job.error;
     v_bot_message := v_job.bot_message;
-    v_subagents := pg_catalog.coalesce(v_job.subagents, '[]'::pg_catalog.jsonb);
-    v_tasks := pg_catalog.coalesce(v_job.tasks, '[]'::pg_catalog.jsonb);
+    v_subagents := pg_catalog.coalesce(v_job.subagents, '[]'::jsonb);
+    v_tasks := pg_catalog.coalesce(v_job.tasks, '[]'::jsonb);
 
     -- Fetch latest progress event if available
     select
@@ -159,7 +159,7 @@ begin
     end if;
 
     if v_terminal then
-      return pg_catalog.jsonb_build_object(
+      return jsonb_build_object(
         'job_id', v_job.id,
         'found', true,
         'status', v_status,
@@ -188,7 +188,7 @@ begin
     end if;
 
     if pg_catalog.clock_timestamp() >= v_deadline then
-      return pg_catalog.jsonb_build_object(
+      return jsonb_build_object(
         'job_id', v_job.id,
         'found', true,
         'status', v_status,
@@ -221,7 +221,7 @@ begin
 end;
 $$;
 
-revoke all on function private.wait_agent_job(pg_catalog.uuid, pg_catalog.integer, pg_catalog.integer) from public, anon, authenticated;
-grant execute on function private.wait_agent_job(pg_catalog.uuid, pg_catalog.integer, pg_catalog.integer) to service_role;
+revoke all on function private.wait_agent_job(uuid, integer, integer) from public, anon, authenticated;
+grant execute on function private.wait_agent_job(uuid, integer, integer) to service_role;
 
 commit;
