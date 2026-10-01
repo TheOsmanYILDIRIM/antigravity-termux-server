@@ -587,6 +587,22 @@ For bridge schema or migration changes:
 - Perform at least one real function invocation for newly added DB functions/RPCs and verify expected privileges when security-sensitive.
 - Preserve the actual DB error if validation fails; do not claim success based only on static checks.
 
+
+### 9.4 ChatGPT turn-latency discipline
+
+The bridge should optimize not only database requests but also ChatGPT model↔tool round trips.
+
+- Enqueue one logical AGY job once.
+- After the first snapshot, use the 4-argument cursor-aware wait with the last seen `progress_seq`.
+- When the tool runtime supports orchestration/composition, perform consecutive bounded waits for the SAME job inside one orchestration call rather than returning control to the model after every 20–30 second timeout.
+- Stop that internal wait loop immediately on terminal state or meaningful new progress that actually requires model/user intervention.
+- Do not surface `changed=false` timeouts.
+- Coalesce low-value ACTIVE/DONE churn; user-visible progress is for meaningful phase changes, not every tool event.
+- Prefer one AGY job that performs inspect → modify → test → diff → final report over multiple ChatGPT-side micro-jobs for the same repository task.
+- Avoid redundant verification across Supabase, GitHub and AGY unless debugging a disagreement between them.
+
+This reduces long single-turn latency and the chance of ChatGPT UI entering extended-processing states without weakening terminal/result verification.
+
 ---
 
 ## 10. Error handling
