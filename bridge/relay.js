@@ -72,7 +72,21 @@ async function agy(method, path, body = undefined, timeoutMs = 30000) {
 }
 
 async function claimJob() {
-  const rows = await rpc("claim_agent_job", { p_worker_id: cfg.workerId, p_lease_seconds: cfg.leaseSeconds });
+  let rows;
+  try {
+    rows = await rpc("claim_agent_job_wait", {
+      p_worker_id: cfg.workerId,
+      p_lease_seconds: cfg.leaseSeconds,
+      p_timeout_seconds: 25,
+      p_poll_interval_ms: 1000
+    });
+  } catch (e) {
+    // Backward-compatible fallback while database migration rolls out.
+    rows = await rpc("claim_agent_job", {
+      p_worker_id: cfg.workerId,
+      p_lease_seconds: cfg.leaseSeconds
+    });
+  }
   return Array.isArray(rows) && rows.length ? rows[0] : null;
 }
 async function heartbeat(job) {
@@ -595,9 +609,9 @@ async function main() {
       if (!job) {
         idleRounds += 1;
         if (activeJobPromises.size > 0) {
-          await Promise.race([...activeJobPromises, sleep(Math.min(10000, adaptiveIdlePollMs(idleRounds)))]);
+          await Promise.race([...activeJobPromises, sleep(250)]);
         } else {
-          await sleep(adaptiveIdlePollMs(idleRounds));
+          await sleep(250);
         }
         continue;
       }
@@ -620,5 +634,3 @@ async function main() {
 }
 
 main().catch(e => { log("ERROR", "fatal relay error", errJson(e)); process.exitCode = 1; });
-
-module.exports.__test = { adaptiveIdlePollMs };
