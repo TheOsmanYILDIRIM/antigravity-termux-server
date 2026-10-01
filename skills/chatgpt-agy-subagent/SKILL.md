@@ -700,6 +700,55 @@ When coordinating with AGY through the bridge, ChatGPT should structure executio
 
 ## 14. ChatGPT response behavior after delegation
 
+### 14.1 Progressive user-visible updates
+
+For long or delegated AGY jobs, ChatGPT should surface meaningful milestone updates to the user instead of staying silent until the final result.
+
+Use the SAME `job_id` throughout. Never create a duplicate job just to obtain progress.
+
+Interpret progress events / `wait_agent_job` snapshots as follows:
+
+1. **Job accepted / claimed**
+   - On first transition to `claimed` or first `relay_claimed` event, send one short user-visible update.
+   - Example: `AGY görevi aldı; işi başlatıyorum.`
+
+2. **Generation started**
+   - On first `generating_start` for that job, send a separate update.
+   - Example: `AGY üretime başladı.`
+   - Do not repeat this message for duplicate `generating_start` events.
+
+3. **Tool activity**
+   - When `progress_seq` advances to a new `tool_update`, surface concise tool progress.
+   - For tool state `ACTIVE`: example `AGY şimdi run_command kullanıyor: testleri çalıştırıyor.`
+   - For tool state `DONE`: example `run_command tamamlandı; sıradaki adıma geçti.`
+   - Prefer the real tool name and a short safe summary from event metadata.
+   - Do not expose secrets, full command contents, hidden prompts, raw environment dumps, or sensitive paths.
+   - Do not emit duplicate updates when `progress_seq` has not changed.
+   - If many low-value tool events arrive rapidly, coalesce them into one concise update rather than spamming the user.
+
+4. **Subagent / task milestones**
+   - New `subagents_update` or `tasks_update` may be surfaced when they represent a meaningful phase transition.
+   - Example: `Kod incelemesi bitti; şimdi test aşamasında.`
+
+5. **Final**
+   - `kind=final` or `terminal=true` is the only terminal signal.
+   - On `completed`, stop polling immediately and use `response_text`.
+   - On `failed` / `cancelled`, stop polling immediately and report the actual error/status.
+   - `timed_out=true` alone is never a terminal signal.
+
+Recommended visible sequence:
+
+```text
+AGY görevi aldı.
+→ AGY üretime başladı.
+→ run_command kullanıyor: testleri çalıştırıyor.
+→ run_command tamamlandı.
+→ Git işlemleri tamamlandı; CI doğrulanıyor.
+→ Final sonuç.
+```
+
+The goal is milestone visibility, not a raw event stream. Keep updates short and useful.
+
 After AGY succeeds:
 
 - answer the user's actual question;
