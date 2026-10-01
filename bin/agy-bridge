@@ -11,6 +11,21 @@ fi
 ENV_FILE="${ANTIGRAVITY_BRIDGE_ENV:-$HOME/.config/antigravity-bridge/bridge.env}"
 LOG_FILE="${ANTIGRAVITY_BRIDGE_LOG:-$HOME/.cache/antigravity-bridge/relay.log}"
 
+ensure_beyin_bridge() {
+  if ! command -v avenox-bridge >/dev/null 2>&1; then
+    echo "❌ Beyin Bridge komutu bulunamadı: avenox-bridge"
+    return 1
+  fi
+
+  echo "🧠 Beyin Bridge kontrol ediliyor..."
+  if ! avenox-bridge start >/dev/null 2>&1; then
+    echo "❌ Beyin Bridge başlatılamadı."
+    return 1
+  fi
+  echo "✅ Beyin Bridge hazır."
+  return 0
+}
+
 ensure_env() {
   if [ ! -f "$ENV_FILE" ]; then
     echo "❌ Bridge env bulunamadı: $ENV_FILE"
@@ -22,6 +37,11 @@ ensure_env() {
 
 case "${1:-}" in
   start)
+    # ChatGPT bridge always depends on the Avenox Beyin bridge being available.
+    # Run this even when agy-bridge itself is already active so a separately
+    # stopped/crashed Beyin worker is healed by the next start command.
+    ensure_beyin_bridge || exit 1
+
     if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
       echo "🟢 Antigravity ChatGPT Bridge zaten çalışıyor."
       exit 0
