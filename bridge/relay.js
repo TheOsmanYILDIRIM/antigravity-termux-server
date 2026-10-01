@@ -12,8 +12,8 @@ const cfg = {
   workerId: process.env.ANTIGRAVITY_BRIDGE_WORKER_ID || `termux-${os.hostname() || "android"}`,
   concurrency: envInt("ANTIGRAVITY_BRIDGE_CONCURRENCY", 3, 1, 10),
   pollMs: envInt("ANTIGRAVITY_BRIDGE_POLL_MS", 3000, 500, 60000),
-  heartbeatMs: envInt("ANTIGRAVITY_BRIDGE_HEARTBEAT_MS", 20000, 5000, 120000),
-  leaseSeconds: envInt("ANTIGRAVITY_BRIDGE_LEASE_SECONDS", 120, 30, 900),
+  heartbeatMs: envInt("ANTIGRAVITY_BRIDGE_HEARTBEAT_MS", 45000, 5000, 120000),
+  leaseSeconds: envInt("ANTIGRAVITY_BRIDGE_LEASE_SECONDS", 180, 30, 900),
   jobTimeoutMs: envInt("ANTIGRAVITY_BRIDGE_JOB_TIMEOUT_MS", 3900000, 60000, 21600000)
 };
 
@@ -97,9 +97,31 @@ async function completeJob(job, result) {
 async function failJob(job, error) {
   return Boolean(await rpc("fail_agent_job", { p_job_id: job.id, p_worker_id: cfg.workerId, p_claim_token: job.claim_token, p_error: error }));
 }
-async function event(jobId, eventType, payload = {}) {
-  try { await sb("POST", "/rest/v1/agent_events", { job_id: jobId, event_type: eventType, payload }, { Prefer: "return=minimal" }); }
-  catch (e) { log("WARN", "event write failed", { jobId, eventType, ...errJson(e) }); }
+const heartbeatCoupledEvents = new Set([
+  "relay_claimed","submitted","generating_start","init","tool_update",
+  "subagents_update","tasks_update","account_switched","auth_required",
+  "done","error","stopped","generating_done","recovery_started"
+]);
+
+async function event(job, eventType, payload = {}) {
+  const jobId = job?.id;
+  if (!jobId) return;
+  try {
+    if (heartbeatCoupledEvents.has(eventType) && job.worker_id && job.claim_token) {
+      const eventId = await rpc("record_agent_event", {
+        p_job_id: job.id,
+        p_worker_id: cfg.workerId,
+        p_claim_token: job.claim_token,
+        p_event_type: eventType,
+        p_payload: payload,
+        p_lease_seconds: cfg.leaseSeconds
+      });
+      if (eventId != null) return eventId;
+    }
+    await sb("POST", "/rest/v1/agent_events", { job_id: jobId, event_type: eventType, payload }, { Prefer: "return=minimal" });
+  } catch (e) {
+    log("WARN", "event write failed", { jobId, eventType, ...errJson(e) });
+  }
 }
 
 class SseHub {
@@ -291,10 +313,10 @@ async function runJob(job) {
   }
 
   try {
-    await event(job.id, "relay_claimed", { workerId: cfg.workerId, attempt: job.attempts });
+    await event(job, "relay_claimed", { workerId: cfg.workerId, attempt: job.attempts });
     if (!(await markRunning(job, conversationId))) throw new Error("lost job ownership before run");
     const body = buildChatBody(job);
-    await event(job.id, "submitted", { requestId: job.id, conversationId: body.conversationId || null, model: body.model || null, effort: body.effort || null, mode: body.mode || null });
+    await event(job, "submitted", { requestId: job.id, conversationId: body.conversationId || null, model: body.model || null, effort: body.effort || null, mode: body.mode || null });
     await agy("POST", "/api/chat", body, 30000);
 
     while (!stopping && Date.now() < deadline) {
@@ -348,7 +370,7 @@ async function runJob(job) {
         if (typeof d.full_content === "string" && d.full_content.length >= streamedText.length) streamedText = d.full_content;
         else if (typeof d.text_delta === "string") streamedText += d.text_delta;
       }
-      if (persistedEvents.has(ev.name)) await event(job.id, ev.name, d);
+      if (persistedEvents.has(ev.name)) await event(job, ev.name, d);
       if (ev.name === "done") {
         conversationId = d.conversationId || conversationId;
         doneBot = d.botMessage || null;
@@ -395,7 +417,7 @@ async function runJob(job) {
       throw e;
     }
     if (!(await completeJob(job, result))) throw new Error("lost job ownership at completion");
-    await event(job.id, "relay_completed", { conversationId: result.conversationId, responseChars: result.responseText.length, subagents: result.subagents.length, tasks: result.tasks.length });
+    await event(job, "relay_completed", { conversationId: result.conversationId, responseChars: result.responseText.length, subagents: result.subagents.length, tasks: result.tasks.length });
     log("INFO", "job completed", { jobId: job.id, conversationId: result.conversationId });
   } catch (e) {
     stopHeartbeat();
@@ -414,7 +436,7 @@ async function runJob(job) {
     }
     const payload = { code: e.code || "relay_error", ...errJson(e) };
     try { await failJob(job, payload); } catch {}
-    await event(job.id, "relay_failed", payload);
+    await event(job, "relay_failed", payload);
   } finally {
     unsubscribe();
     stopHeartbeat();
@@ -437,7 +459,7 @@ async function recoverRunning(job, conversationId, deadline = Date.now() + cfg.j
       log("WARN", "heartbeat ownership lost during recovery", { jobId: job.id });
       return;
     }
-    await event(job.id, "recovery_started", { workerId: cfg.workerId, conversationId });
+    await event(job, "recovery_started", { workerId: cfg.workerId, conversationId });
     while (!stopping && Date.now() < deadline) {
       if (ownershipLost) {
         const e = new Error("Job ownership lost or cancelled during recovery");
@@ -461,7 +483,7 @@ async function recoverRunning(job, conversationId, deadline = Date.now() + cfg.j
       }
       stopHeartbeat();
       if (!(await completeJob(job, result))) throw new Error("lost recovered job ownership");
-      await event(job.id, "recovery_completed", { conversationId, responseChars: result.responseText.length, subagents: result.subagents.length, tasks: result.tasks.length });
+      await event(job, "recovery_completed", { conversationId, responseChars: result.responseText.length, subagents: result.subagents.length, tasks: result.tasks.length });
       log("INFO", "recovered job completed", { jobId: job.id, conversationId });
       return;
     }
@@ -489,7 +511,7 @@ async function recoverStale() {
       try {
         const ok = Boolean(await rpc("requeue_stale_claimed_agent_job", { p_job_id: job.id, p_worker_id: cfg.workerId, p_claim_token: job.claim_token }));
         if (ok) {
-          await event(job.id, "stale_claim_requeued", { workerId: cfg.workerId });
+          await event(job, "stale_claim_requeued", { workerId: cfg.workerId });
           log("INFO", "stale claim requeued", { jobId: job.id });
         }
       } catch (e) {
@@ -499,7 +521,7 @@ async function recoverStale() {
       if (!job.conversation_id) {
         const p = { code: "STALE_RUNNING_WITHOUT_CONVERSATION", message: "Job was not replayed because relay lost the conversation id; duplicate execution avoided." };
         try { await failJob(job, p); } catch {}
-        await event(job.id, "recovery_failed", p);
+        await event(job, "recovery_failed", p);
         continue;
       }
       try {
@@ -507,7 +529,7 @@ async function recoverStale() {
       } catch (e) {
         const p = { code: e.code || "recovery_error", ...errJson(e) };
         try { await failJob(job, p); } catch {}
-        await event(job.id, "recovery_failed", p);
+        await event(job, "recovery_failed", p);
       }
     }
   }
@@ -525,6 +547,18 @@ async function agyAvailableCapacity() {
   }
 }
 
+function adaptiveIdlePollMs(idleRounds, rand = Math.random) {
+  const n = Math.max(1, Number(idleRounds) || 1);
+  let base;
+  if (n <= 10) base = 3000;
+  else if (n <= 24) base = 5000;
+  else if (n <= 36) base = 10000;
+  else if (n <= 42) base = 30000;
+  else base = 60000;
+  const r = Math.max(0, Math.min(1, Number(rand()) || 0));
+  return Math.round(base * (0.9 + r * 0.2));
+}
+
 async function main() {
   log("INFO", "Antigravity ChatGPT relay starting", { workerId: cfg.workerId, agyUrl: cfg.agyUrl, concurrency: cfg.concurrency });
   sseHub = new SseHub(`${cfg.agyUrl}/api/events`);
@@ -532,6 +566,7 @@ async function main() {
 
   await recoverStale();
   let lastRecovery = Date.now();
+  let idleRounds = 0;
 
   while (!stopping) {
     try {
@@ -550,21 +585,24 @@ async function main() {
         if (activeJobPromises.size > 0) {
           await Promise.race([...activeJobPromises, sleep(Math.max(cfg.pollMs, 2000))]);
         } else {
-          await sleep(Math.max(cfg.pollMs, 3000));
+          idleRounds += 1;
+          await sleep(adaptiveIdlePollMs(idleRounds));
         }
         continue;
       }
 
       const job = await claimJob();
       if (!job) {
+        idleRounds += 1;
         if (activeJobPromises.size > 0) {
-          await Promise.race([...activeJobPromises, sleep(cfg.pollMs)]);
+          await Promise.race([...activeJobPromises, sleep(Math.min(10000, adaptiveIdlePollMs(idleRounds)))]);
         } else {
-          await sleep(cfg.pollMs);
+          await sleep(adaptiveIdlePollMs(idleRounds));
         }
         continue;
       }
 
+      idleRounds = 0;
       log("INFO", "job claimed", { jobId: job.id, attempt: job.attempts, activeJobs: activeJobPromises.size + 1, maxConcurrency: cfg.concurrency });
       const p = runJob(job).finally(() => activeJobPromises.delete(p));
       activeJobPromises.add(p);
@@ -582,3 +620,5 @@ async function main() {
 }
 
 main().catch(e => { log("ERROR", "fatal relay error", errJson(e)); process.exitCode = 1; });
+
+module.exports.__test = { adaptiveIdlePollMs };
