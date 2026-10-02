@@ -1,0 +1,49 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -euo pipefail
+PORT="${PORT:-8080}"
+BASE_URL="${AGY_WEB_URL:-http://127.0.0.1:${PORT}}"
+LOG_FILE="/data/data/com.termux/files/home/agy_latency.log"
+PROMPT="${*:-Sadece TAMAM yaz.}"
+TRACE_ID="latprobe_$(date +%s)_$RANDOM"
+START_LINE=1
+if [ -f "$LOG_FILE" ]; then START_LINE=$(( $(wc -l < "$LOG_FILE") + 1 )); fi
+
+echo "⚡ Latency probe başlatılıyor"
+echo "Trace: $TRACE_ID"
+RESP=$(curl -sS -X POST "$BASE_URL/api/chat" -H 'Content-Type: application/json' --data-binary "$(jq -nc --arg p "$PROMPT" --arg t "$TRACE_ID" '{prompt:$p,continue:false,client:"latency-probe",traceId:$t,useVault:false}')")
+echo "POST: $RESP"
+
+DEADLINE=$(( $(date +%s) + 180 ))
+while [ $(date +%s) -lt $DEADLINE ]; do
+  if [ -f "$LOG_FILE" ] && tail -n +$START_LINE "$LOG_FILE" | grep -F ""traceId":"$TRACE_ID"" | grep -Eq '"stage":"(result|close)"'; then break; fi
+  sleep 1
+done
+
+echo
+echo "=== TRACE ==="
+tail -n +$START_LINE "$LOG_FILE" 2>/dev/null | grep -F ""traceId":"$TRACE_ID"" || true
+echo
+echo "=== ÖZET ==="
+python3 - "$LOG_FILE" "$TRACE_ID" "$START_LINE" <<'PY'
+import json,sys
+path,tid,start=sys.argv[1],sys.argv[2],int(sys.argv[3]); rows=[]
+try:
+  with open(path,encoding="utf-8") as f:
+    for i,line in enumerate(f,1):
+      if i<start: continue
+      try:x=json.loads(line)
+      except:continue
+      if x.get("traceId")==tid: rows.append(x)
+except FileNotFoundError: pass
+if not rows:
+  print("Trace bulunamadı."); raise SystemExit(2)
+for r in rows: print(f'{r.get("stage","?"):22s} {float(r.get("elapsedMs",0)):9.1f} ms')
+def t(k):
+  for r in rows:
+    if r.get("stage")==k:return float(r.get("elapsedMs",0))
+pairs=[("request→prepared","request_received","prompt_prepared"),("prepared→spawn","prompt_prepared","spawned"),("spawn→stdout","spawned","first_stdout"),("stdout→init","first_stdout","init"),("init→write","init","prompt_write_start"),("write→flush","prompt_write_start","prompt_write_flushed"),("flush→step","prompt_write_flushed","first_step_update"),("step→text","first_step_update","first_text"),("text→result","first_text","result"),("request→result","request_received","result")]
+print()
+for label,a,b in pairs:
+  ta,tb=t(a),t(b)
+  if ta is not None and tb is not None: print(f'{label:22s} {tb-ta:9.1f} ms')
+PY
