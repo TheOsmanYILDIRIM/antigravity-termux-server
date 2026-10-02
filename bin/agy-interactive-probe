@@ -1,13 +1,15 @@
 #!/data/data/com.termux/files/usr/bin/bash
 set -euo pipefail
-PROMPT="${*:-Sadece TAMAM yaz.}"
+# Sentinel text itself is intentionally absent from the prompt so terminal echo/redraw
+# cannot be mistaken for a model response.
+PROMPT="${*:-ASCII kodları 79, 83, 77, 65, 78 olan karakterleri sırayla birleştir ve yalnız oluşan kelimeyi yaz.}"
+SENTINEL="OSMAN"
 OUT="/data/data/com.termux/files/home/agy_interactive_probe_$(date +%s).log"
 
-python3 - "$PROMPT" "$OUT" <<'PY'
+python3 - "$PROMPT" "$SENTINEL" "$OUT" <<'PY'
 import os, pty, select, signal, sys, time, re
 
-prompt = sys.argv[1]
-out_path = sys.argv[2]
+prompt, sentinel, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
 agy = "/data/data/com.termux/files/usr/bin/agy"
 env = os.environ.copy()
 env["HOME"] = "/data/data/com.termux/files/home"
@@ -19,52 +21,62 @@ if pid == 0:
     os.execve(agy, [agy], env)
 
 start = time.monotonic()
-buf = b""
+screen = ""
 sent = False
-first_after_send = None
-deadline = start + 90
+sent_at = None
+first_visible_at = None
+sentinel_at = None
+deadline = start + 120
 
-def write_log(data):
+ansi = re.compile(r'\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+
+def append_log(data):
     with open(out_path, "ab") as f:
         f.write(data)
 
 try:
     while time.monotonic() < deadline:
         r,_,_ = select.select([fd], [], [], 0.1)
-        if r:
-            try:
-                data = os.read(fd, 65536)
-            except OSError:
-                break
-            if not data:
-                break
-            write_log(data)
-            buf += data
-            text = buf.decode("utf-8", "ignore")
-            # Wait until the interactive client has painted something that looks
-            # like its input UI before sending the prompt.
-            if not sent and (">" in text or "Antigravity" in text or "Gemini" in text):
+        if not r:
+            if not sent and time.monotonic() - start > 20:
                 os.write(fd, (prompt + "\n").encode())
                 sent = True
                 sent_at = time.monotonic()
-                buf = b""
+                screen = ""
                 print(f"PROMPT_SENT_MS={(sent_at-start)*1000:.1f}", flush=True)
-                continue
-            if sent and first_after_send is None:
-                # Ignore pure ANSI/control redraws and echoed prompt.
-                cleaned = re.sub(r'\x1b\[[0-9;?]*[ -/]*[@-~]', '', text)
-                cleaned = cleaned.replace(prompt, "").strip()
-                if cleaned:
-                    first_after_send = time.monotonic()
-                    print(f"FIRST_OUTPUT_AFTER_PROMPT_MS={(first_after_send-sent_at)*1000:.1f}", flush=True)
-                    break
-        elif not sent and time.monotonic() - start > 20:
-            # Fallback: send even if prompt marker wasn't recognized.
-            os.write(fd, (prompt + "\n").encode())
-            sent = True
-            sent_at = time.monotonic()
-            buf = b""
-            print(f"PROMPT_SENT_MS={(sent_at-start)*1000:.1f}", flush=True)
+            continue
+
+        try:
+            data = os.read(fd, 65536)
+        except OSError:
+            break
+        if not data:
+            break
+        append_log(data)
+        text = data.decode("utf-8", "ignore")
+        screen += text
+
+        if not sent:
+            clean = ansi.sub("", screen)
+            # Wait until the TUI has rendered enough to accept keyboard input.
+            if "Antigravity" in clean or "Gemini" in clean or ">" in clean:
+                os.write(fd, (prompt + "\n").encode())
+                sent = True
+                sent_at = time.monotonic()
+                screen = ""
+                print(f"PROMPT_SENT_MS={(sent_at-start)*1000:.1f}", flush=True)
+            continue
+
+        clean = ansi.sub("", screen).replace("\r", "\n")
+        # Track redraw latency separately, but do not call it a model answer.
+        if first_visible_at is None and clean.strip():
+            first_visible_at = time.monotonic()
+            print(f"FIRST_TUI_ACTIVITY_MS={(first_visible_at-sent_at)*1000:.1f}", flush=True)
+
+        if sentinel in clean:
+            sentinel_at = time.monotonic()
+            print(f"MODEL_SENTINEL_MS={(sentinel_at-sent_at)*1000:.1f}", flush=True)
+            break
 finally:
     try:
         os.kill(pid, signal.SIGTERM)
@@ -78,8 +90,9 @@ finally:
 if not sent:
     print("ERROR=interactive_prompt_not_sent")
     sys.exit(2)
-if first_after_send is None:
-    print("ERROR=no_output_within_timeout")
+if sentinel_at is None:
+    print("ERROR=sentinel_not_seen_within_timeout")
+    print(f"LOG={out_path}")
     sys.exit(3)
 print(f"LOG={out_path}")
 PY
