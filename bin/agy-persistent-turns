@@ -1,0 +1,114 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -euo pipefail
+MODEL="${AGY_TEST_MODEL:-gemini-3.7-flash-medium}"
+EFFORT="${AGY_TEST_EFFORT:-medium}"
+OUT="/data/data/com.termux/files/home/agy_persistent_turns_$(date +%s).log"
+
+python3 - "$MODEL" "$EFFORT" "$OUT" <<'PY'
+import json, os, subprocess, sys, time, threading, queue
+
+model, effort, out_path = sys.argv[1:4]
+agy = "/data/data/com.termux/files/usr/bin/agy"
+env = os.environ.copy()
+env["HOME"] = "/data/data/com.termux/files/home"
+env["AGY_AUTO_UPDATE"] = "0"
+
+args = [
+    agy,
+    "--input-format", "stream-json",
+    "--output-format", "stream-json",
+    "--dangerously-skip-permissions",
+    "--print-timeout", "60m",
+    "--model", model,
+    "--effort", effort,
+]
+p = subprocess.Popen(
+    args,
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+    bufsize=1,
+    cwd=env["HOME"],
+    env=env,
+)
+
+events = queue.Queue()
+
+def reader(stream, kind):
+    for line in stream:
+        with open(out_path, "a", encoding="utf-8") as f:
+            f.write(kind + " " + line)
+        if kind == "OUT":
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            events.put(obj)
+
+threading.Thread(target=reader, args=(p.stdout, "OUT"), daemon=True).start()
+threading.Thread(target=reader, args=(p.stderr, "ERR"), daemon=True).start()
+
+# Wait for init before round 1.
+init_t0 = time.monotonic()
+while True:
+    obj = events.get(timeout=90)
+    if obj.get("event") == "init":
+        init_ms = (time.monotonic() - init_t0) * 1000
+        print(f"INIT_MS={init_ms:.1f}", flush=True)
+        break
+
+prompts = [
+    "Sadece BIR yaz.",
+    "Sadece IKI yaz.",
+    "Sadece UC yaz.",
+]
+
+for idx, prompt in enumerate(prompts, 1):
+    payload = {"event":"user","message":{"content":[{"type":"text","text":prompt}]}}
+    start = time.monotonic()
+    p.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    p.stdin.flush()
+    first_step = None
+    first_text = None
+    result = None
+    while True:
+        obj = events.get(timeout=120)
+        ev = obj.get("event")
+        now = time.monotonic()
+        if ev == "step_update" and first_step is None:
+            first_step = (now - start) * 1000
+            upd = obj.get("step_update") or {}
+            if upd.get("text_delta") and first_text is None:
+                first_text = first_step
+        elif ev == "step_update":
+            upd = obj.get("step_update") or {}
+            if upd.get("text_delta") and first_text is None:
+                first_text = (now - start) * 1000
+        elif ev == "result":
+            result = (now - start) * 1000
+            r = obj.get("result") or {}
+            response = r.get("response")
+            print(
+                f"TURN={idx} FIRST_STEP_MS={first_step if first_step is not None else -1:.1f} "
+                f"FIRST_TEXT_MS={first_text if first_text is not None else -1:.1f} "
+                f"RESULT_MS={result:.1f} RESPONSE={response!r}",
+                flush=True
+            )
+            break
+
+try:
+    p.stdin.close()
+except Exception:
+    pass
+try:
+    p.terminate()
+except Exception:
+    pass
+try:
+    p.wait(timeout=5)
+except Exception:
+    p.kill()
+
+print(f"LOG={out_path}")
+PY
