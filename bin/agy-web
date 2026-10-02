@@ -62,6 +62,10 @@ case "$1" in
     bash "$DIR/bin/agy-invocation-matrix" "${@:2}"
     ;;
 
+  interactive-probe)
+    bash "$DIR/bin/agy-interactive-probe" "${@:2}"
+    ;;
+
   update)
     shift
     exec bash "$DIR/bin/agy-update" "$@"
@@ -102,6 +106,7 @@ case "$1" in
     echo "  agy-web latency-test [prompt] -> İstekten sonuca ayrıntılı gecikme ölçümü yapar"
     echo "  agy-web runtime-compare [prompt] -> Normal AGY ile server CPU koşullarını karşılaştırır"
     echo "  agy-web invocation-matrix [prompt] -> CLI argüman/cwd farklarını ölçer"
+    echo "  agy-web interactive-probe [prompt] -> Gerçek interaktif AGY yanıt gecikmesini ölçer"
     echo "  agy-web status   -> Çalışma durumunu ve PID gösterir"
     echo "  agy-web open     -> Tarayıcıda http://127.0.0.1:$PORT sayfasını açar"
     echo "  agy-web attach   -> Tmux log ekranına canlı bağlanır"
