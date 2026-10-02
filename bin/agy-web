@@ -74,6 +74,10 @@ case "$1" in
     bash "$DIR/bin/agy-persistent-turns" "${@:2}"
     ;;
 
+  prompt-size-bench)
+    bash "$DIR/bin/agy-prompt-size-bench" "${@:2}"
+    ;;
+
   update)
     shift
     exec bash "$DIR/bin/agy-update" "$@"
@@ -117,6 +121,7 @@ case "$1" in
     echo "  agy-web interactive-probe [prompt] -> Gerçek interaktif AGY yanıt gecikmesini ölçer"
     echo "  agy-web headless-matrix [prompt] -> Headless transport ve model gecikmesini karşılaştırır"
     echo "  agy-web persistent-turns -> Aynı AGY processinde 3 ardışık turun gecikmesini ölçer"
+    echo "  agy-web prompt-size-bench -> Mobil talimat bloğunun warm-worker gecikmesini ölçer"
     echo "  agy-web status   -> Çalışma durumunu ve PID gösterir"
     echo "  agy-web open     -> Tarayıcıda http://127.0.0.1:$PORT sayfasını açar"
     echo "  agy-web attach   -> Tmux log ekranına canlı bağlanır"
