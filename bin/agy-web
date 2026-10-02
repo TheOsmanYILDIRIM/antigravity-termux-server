@@ -22,8 +22,8 @@ case "$1" in
       echo "⚡ Antigravity Server tmux içinde zaten çalışıyor!"
       echo "📱 Port: http://127.0.0.1:$PORT (veya http://localhost:$PORT)"
     else
-      echo "🚀 Antigravity Server verimlilik çekirdekleriyle (taskset -c 0-5 & nice -n 10) başlatılıyor..."
-      tmux new-session -d -s "$SESSION_NAME" -c "$DIR" "nice -n 10 taskset -c 0-5 node server.js"
+      echo "🚀 Antigravity Server normal CPU önceliğiyle başlatılıyor..."
+      tmux new-session -d -s "$SESSION_NAME" -c "$DIR" "node server.js"
       sleep 1
       if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
         echo "✅ Başlatıldı! (tmux session: $SESSION_NAME)"
