@@ -1,0 +1,61 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -u
+PROMPT="${*:-Sadece TAMAM yaz.}"
+AGY="/data/data/com.termux/files/usr/bin/agy"
+HOME_DIR="/data/data/com.termux/files/home"
+STAMP="$(date +%s)"
+REPORT="$HOME_DIR/agy_headless_matrix_${STAMP}.log"
+
+run_print() {
+  local name="$1"; shift
+  local out="$HOME_DIR/.agy_headless_${name}_${STAMP}.out"
+  local err="$HOME_DIR/.agy_headless_${name}_${STAMP}.err"
+  local start=$(date +%s%N)
+  "$AGY" -p "$PROMPT" "$@" >"$out" 2>"$err"
+  local rc=$?
+  local end=$(date +%s%N)
+  local total=$(( (end-start)/1000000 ))
+  echo "CASE=$name TOTAL_MS=$total EXIT=$rc" | tee -a "$REPORT"
+  head -c 200 "$out" | tr '\n' ' ' | sed 's/^/OUT=/' | tee -a "$REPORT"; echo | tee -a "$REPORT"
+}
+
+run_stream_input() {
+  local name="$1"; shift
+  local out="$HOME_DIR/.agy_headless_${name}_${STAMP}.out"
+  local err="$HOME_DIR/.agy_headless_${name}_${STAMP}.err"
+  local payload
+  payload=$(jq -nc --arg p "$PROMPT" '{event:"user",message:{content:[{type:"text",text:$p}]}}')
+  local start=$(date +%s%N)
+  printf '%s\n' "$payload" | "$AGY" --input-format stream-json --output-format stream-json --print-timeout 60m "$@" >"$out" 2>"$err"
+  local rc=$?
+  local end=$(date +%s%N)
+  local total=$(( (end-start)/1000000 ))
+  echo "CASE=$name TOTAL_MS=$total EXIT=$rc" | tee -a "$REPORT"
+  grep -m1 '"event":"init"' "$out" | head -c 400 | sed 's/^/INIT=/' | tee -a "$REPORT"; echo | tee -a "$REPORT"
+  grep -m1 '"event":"result"' "$out" | head -c 400 | sed 's/^/RESULT=/' | tee -a "$REPORT"; echo | tee -a "$REPORT"
+}
+
+echo "AGY headless/model matrix" | tee "$REPORT"
+
+echo "1/6 print default"
+run_print print_default
+
+echo "2/6 stream-input default"
+run_stream_input stream_default
+
+echo "3/6 stream-input 3.7 flash low"
+run_stream_input stream_37_low --model gemini-3.7-flash-low --effort low
+
+echo "4/6 stream-input 3.7 flash medium"
+run_stream_input stream_37_medium --model gemini-3.7-flash-medium --effort medium
+
+echo "5/6 print 3.7 flash low"
+run_print print_37_low --model gemini-3.7-flash-low --effort low
+
+echo "6/6 print 3.7 flash medium"
+run_print print_37_medium --model gemini-3.7-flash-medium --effort medium
+
+echo
+echo "=== SUMMARY ==="
+grep '^CASE=' "$REPORT"
+echo "REPORT=$REPORT"
