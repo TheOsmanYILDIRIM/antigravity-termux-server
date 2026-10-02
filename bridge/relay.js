@@ -108,8 +108,101 @@ async function completeJob(job, result) {
     p_subagents: result.subagents || [], p_tasks: result.tasks || []
   }));
 }
+async function saveProgress(job, result) {
+  if (!job?.id || !job.claim_token) return false;
+  try {
+    const ok = await rpc("save_agent_job_progress", {
+      p_job_id: job.id,
+      p_worker_id: cfg.workerId,
+      p_claim_token: job.claim_token,
+      p_conversation_id: result.conversationId || job.conversation_id || "",
+      p_response_text: result.responseText || "",
+      p_bot_message: result.botMessage || null,
+      p_subagents: result.subagents || [],
+      p_tasks: result.tasks || [],
+      p_lease_seconds: cfg.leaseSeconds
+    });
+    if (ok) return true;
+  } catch (e) {
+    // backward-compatible fallback if DB migration is rolling out
+  }
+  try {
+    await heartbeat(job);
+    const activeTasks = Array.isArray(result.tasks) ? result.tasks.filter(isItemActive) : [];
+    const firstActiveTask = activeTasks[0];
+    await rpc("record_agent_event", {
+      p_job_id: job.id,
+      p_worker_id: cfg.workerId,
+      p_claim_token: job.claim_token,
+      p_event_type: "tasks_update",
+      p_payload: {
+        conversationId: result.conversationId,
+        tasks: result.tasks,
+        subagents: result.subagents,
+        toolAction: firstActiveTask ? `Task ${firstActiveTask.id || firstActiveTask.name} running` : undefined,
+        toolSummary: firstActiveTask ? "Background task running" : undefined,
+        message: firstActiveTask ? `Background task ${firstActiveTask.id || firstActiveTask.name} is running` : undefined
+      },
+      p_lease_seconds: cfg.leaseSeconds
+    });
+    return true;
+  } catch {}
+  return false;
+}
 async function failJob(job, error) {
   return Boolean(await rpc("fail_agent_job", { p_job_id: job.id, p_worker_id: cfg.workerId, p_claim_token: job.claim_token, p_error: error }));
+}
+const ACTIVE_STATUS_SET = new Set([
+  "pending",
+  "running",
+  "claimed",
+  "queued",
+  "in_progress",
+  "waiting",
+  "waiting_for_message",
+  "waiting_for_input",
+  "waiting_for_dependents"
+]);
+
+function isItemActive(item) {
+  if (!item || typeof item !== "object") return false;
+  const status = String(item.status || "").trim().toLowerCase();
+  if (ACTIVE_STATUS_SET.has(status)) return true;
+  const state = String(item.state || "").trim().toLowerCase();
+  if (ACTIVE_STATUS_SET.has(state)) return true;
+  return false;
+}
+
+function hasActiveTasks(tasks) {
+  return Array.isArray(tasks) && tasks.some(isItemActive);
+}
+
+function hasActiveSubagents(subagents) {
+  return Array.isArray(subagents) && subagents.some(isItemActive);
+}
+
+function hasActiveTools(botMessage) {
+  if (!botMessage || !Array.isArray(botMessage.tools)) return false;
+  return botMessage.tools.some(t => {
+    if (!t || typeof t !== "object") return false;
+    const s = String(t.state || t.status || "").trim().toLowerCase();
+    return ACTIVE_STATUS_SET.has(s);
+  });
+}
+
+function isJobTrulyComplete(result, isGenerating = false) {
+  if (isGenerating) return false;
+  if (!result) return false;
+  const bot = result.botMessage;
+  if (!bot) return false;
+  const botState = String(bot.state || "").trim().toLowerCase();
+  if (botState !== "done") return false;
+  if (!String(result.responseText || bot.content || "").trim()) return false;
+  if (hasActiveTasks(result.tasks)) return false;
+  if (hasActiveTasks(bot.tasks)) return false;
+  if (hasActiveSubagents(result.subagents)) return false;
+  if (hasActiveTools(bot)) return false;
+  return true;
 }
 const heartbeatCoupledEvents = new Set([
   "relay_claimed","submitted","generating_start","init","tool_update",
@@ -268,7 +361,19 @@ async function collectResult(job, conversationId, doneBot = null) {
   }
   let bot = doneBot;
   if ((!bot || !String(bot.content || "").trim()) && Array.isArray(session?.messages)) bot = [...session.messages].reverse().find(m => m?.role === "bot") || bot;
-  return { conversationId: conversationId || session?.conversationId || job.conversation_id || null, responseText: typeof bot?.content === "string" ? bot.content : "", botMessage: bot || null, subagents: Array.isArray(subagents) ? subagents : [], tasks: Array.isArray(tasks) ? tasks : [] };
+  if (bot && Array.isArray(bot.tasks) && bot.tasks.length > 0 && tasks.length === 0) {
+    tasks = bot.tasks;
+  }
+  if (bot && Array.isArray(bot.subagents) && bot.subagents.length > 0 && subagents.length === 0) {
+    subagents = bot.subagents;
+  }
+  return {
+    conversationId: conversationId || session?.conversationId || job.conversation_id || null,
+    responseText: typeof bot?.content === "string" ? bot.content : "",
+    botMessage: bot || null,
+    subagents: Array.isArray(subagents) ? subagents : [],
+    tasks: Array.isArray(tasks) ? tasks : []
+  };
 }
 
 async function runJob(job) {
@@ -342,21 +447,26 @@ async function runJob(job) {
 
       let ev;
       try {
-        ev = await nextEvent(10000);
+        ev = await nextEvent(5000);
       } catch (e) {
         if (e.code === "SSE_TIMEOUT") {
           // A quiet SSE interval is not a terminal signal. AGY can transiently report
           // isGenerating=false while a generation is starting or transitioning.
-          // Treat that state only as an opportunity to recover a durable final result;
-          // never fail a live job solely because one conversation snapshot is inactive.
+          // Check if the job has truly finished all work (including background tasks/subagents).
           if (conversationId) {
             try {
               const statusCheck = await agy("GET", `/api/conversations/${encodeURIComponent(conversationId)}`, undefined, 5000);
-              if (statusCheck && statusCheck.isGenerating === false) {
-                const res = await collectResult(job, conversationId, doneBot);
-                if (String(res.responseText || "").trim() && sessionMatches(statusCheck.session, job)) {
-                  doneBot = res.botMessage;
-                  break;
+              const res = await collectResult(job, conversationId, doneBot);
+              const isGenerating = Boolean(statusCheck?.isGenerating);
+
+              if (isJobTrulyComplete(res, isGenerating) && sessionMatches(statusCheck?.session, job)) {
+                doneBot = res.botMessage;
+                break;
+              } else {
+                if (res.botMessage || res.tasks?.length || res.subagents?.length) {
+                  await saveProgress(job, res);
+                } else {
+                  await heartbeat(job);
                 }
               }
             } catch (err) {
@@ -385,29 +495,67 @@ async function runJob(job) {
         else if (typeof d.text_delta === "string") streamedText += d.text_delta;
       }
       if (persistedEvents.has(ev.name)) await event(job, ev.name, d);
+
       if (ev.name === "done") {
         conversationId = d.conversationId || conversationId;
-        doneBot = d.botMessage || null;
+        let currentBot = d.botMessage || doneBot;
         if (streamedText.trim()) {
-          if (!doneBot || typeof doneBot !== "object") doneBot = { role: "bot", state: "done", tools: [] };
-          if (!String(doneBot.content || "").trim()) doneBot.content = streamedText;
+          if (!currentBot || typeof currentBot !== "object") currentBot = { role: "bot", state: "done", tools: [] };
+          if (!String(currentBot.content || "").trim()) currentBot.content = streamedText;
         }
-        break;
+        doneBot = currentBot;
+
+        const res = await collectResult(job, conversationId, doneBot);
+        let statusCheck = null;
+        try {
+          statusCheck = await agy("GET", `/api/conversations/${encodeURIComponent(conversationId)}`, undefined, 5000);
+        } catch {}
+        const isGenerating = Boolean(statusCheck?.isGenerating);
+
+        if (isJobTrulyComplete(res, isGenerating)) {
+          doneBot = res.botMessage;
+          break;
+        } else {
+          log("INFO", "intermediate turn completed; active work remaining", {
+            jobId: job.id,
+            tasksCount: res.tasks.length,
+            activeTasks: res.tasks.filter(isItemActive).map(t => t.id || t.name),
+            subagentsCount: res.subagents.length,
+            activeSubagents: res.subagents.filter(isItemActive).map(s => s.id || s.role),
+            isGenerating
+          });
+          await saveProgress(job, res);
+        }
       }
+
       if (ev.name === "generating_done") {
         conversationId = d.conversationId || conversationId;
         if (conversationId) {
           const res = await collectResult(job, conversationId, doneBot);
-          if (String(res.responseText || "").trim()) {
+          let statusCheck = null;
+          try {
+            statusCheck = await agy("GET", `/api/conversations/${encodeURIComponent(conversationId)}`, undefined, 5000);
+          } catch {}
+          const isGenerating = Boolean(statusCheck?.isGenerating);
+
+          if (isJobTrulyComplete(res, isGenerating)) {
             doneBot = res.botMessage;
             break;
           } else {
-            const e = new Error("AGY finished generation without a recoverable final response");
-            e.code = "EMPTY_FINAL_RESPONSE";
-            throw e;
+            if (res.botMessage || res.tasks?.length || res.subagents?.length) {
+              await saveProgress(job, res);
+            }
           }
         }
       }
+
+      if (ev.name === "tasks_update" || ev.name === "subagents_update" || ev.name === "tool_update") {
+        if (conversationId) {
+          const res = await collectResult(job, conversationId, doneBot);
+          await saveProgress(job, res);
+        }
+      }
+
       if (ev.name === "error" || ev.name === "stopped") {
         const e = new Error(d.error || d.message || ev.name);
         e.code = ev.name === "error" ? "AGY_ERROR" : "AGY_STOPPED";
@@ -494,6 +642,11 @@ async function recoverRunning(job, conversationId, deadline = Date.now() + cfg.j
         const e = new Error("AGY recovered conversation has no final response");
         e.code = "EMPTY_FINAL_RESPONSE";
         throw e;
+      }
+      if (!isJobTrulyComplete(result, loaded?.isGenerating)) {
+        await saveProgress(job, result);
+        await sleep(cfg.pollMs);
+        continue;
       }
       stopHeartbeat();
       if (!(await completeJob(job, result))) throw new Error("lost recovered job ownership");

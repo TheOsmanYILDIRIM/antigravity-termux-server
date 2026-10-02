@@ -265,6 +265,86 @@ function adaptiveIdlePollMs(idleRounds, rand = () => 0.5) {
   return Math.round(base * (0.9 + r * 0.2));
 }
 
+function simulateSaveAgentJobProgress(db, p_job_id, p_worker_id, p_claim_token, p_conversation_id, p_response_text, p_bot_message = null, p_subagents = [], p_tasks = [], p_lease_seconds = 180) {
+  const j = db.agent_jobs.find(x => x.id === p_job_id && x.worker_id === p_worker_id && x.claim_token === p_claim_token && ["claimed", "running"].includes(x.status));
+  if (!j) return false;
+
+  j.conversation_id = p_conversation_id || j.conversation_id;
+  j.heartbeat_at = new Date().toISOString();
+  j.lease_expires_at = new Date(Date.now() + p_lease_seconds * 1000).toISOString();
+  j.updated_at = new Date().toISOString();
+
+  const existingIdx = db.agent_results.findIndex(x => x.job_id === p_job_id);
+  const resultRow = {
+    job_id: p_job_id,
+    conversation_id: p_conversation_id || null,
+    response_text: p_response_text || "",
+    bot_message: p_bot_message,
+    subagents: p_subagents || [],
+    tasks: p_tasks || [],
+    created_at: new Date().toISOString()
+  };
+  if (existingIdx >= 0) {
+    db.agent_results[existingIdx] = resultRow;
+  } else {
+    db.agent_results.push(resultRow);
+  }
+  return true;
+}
+
+const ACTIVE_STATUS_SET = new Set([
+  "pending",
+  "running",
+  "claimed",
+  "queued",
+  "in_progress",
+  "waiting",
+  "waiting_for_message",
+  "waiting_for_input",
+  "waiting_for_dependents"
+]);
+
+function isItemActive(item) {
+  if (!item || typeof item !== "object") return false;
+  const status = String(item.status || "").trim().toLowerCase();
+  if (ACTIVE_STATUS_SET.has(status)) return true;
+  const state = String(item.state || "").trim().toLowerCase();
+  if (ACTIVE_STATUS_SET.has(state)) return true;
+  return false;
+}
+
+function hasActiveTasks(tasks) {
+  return Array.isArray(tasks) && tasks.some(isItemActive);
+}
+
+function hasActiveSubagents(subagents) {
+  return Array.isArray(subagents) && subagents.some(isItemActive);
+}
+
+function hasActiveTools(botMessage) {
+  if (!botMessage || !Array.isArray(botMessage.tools)) return false;
+  return botMessage.tools.some(t => {
+    if (!t || typeof t !== "object") return false;
+    const s = String(t.state || t.status || "").trim().toLowerCase();
+    return ACTIVE_STATUS_SET.has(s);
+  });
+}
+
+function isJobTrulyComplete(result, isGenerating = false) {
+  if (isGenerating) return false;
+  if (!result) return false;
+  const bot = result.botMessage;
+  if (!bot) return false;
+  const botState = String(bot.state || "").trim().toLowerCase();
+  if (botState !== "done") return false;
+  if (!String(result.responseText || bot.content || "").trim()) return false;
+  if (hasActiveTasks(result.tasks)) return false;
+  if (hasActiveTasks(bot.tasks)) return false;
+  if (hasActiveSubagents(result.subagents)) return false;
+  if (hasActiveTools(bot)) return false;
+  return true;
+}
+
 function simulateRecordAgentEvent(db, p_job_id, p_worker_id, p_claim_token, event_type, payload = {}, leaseSeconds = 180) {
   const j = db.agent_jobs.find(x =>
     x.id === p_job_id &&
@@ -786,6 +866,7 @@ function runTests() {
   {
     const sqlFiles = [
       path.join(__dirname, "migrations", "20261001_request_optimization.sql"),
+      path.join(__dirname, "migrations", "20261002_task_state_safety.sql"),
       path.join(__dirname, "schema.sql")
     ];
     const forbidden = /pg_catalog\.(?:bigint|integer|double\s+precision|coalesce|least|greatest|nullif)\b/i;
@@ -796,7 +877,254 @@ function runTests() {
     console.log("✓ Test 19 passed: SQL portability guard rejects invalid pg_catalog aliases/special forms");
   }
 
-  console.log("\nAll 19 test cases passed successfully!");
+  // Test 20: bot message done + task running => job remains running
+  {
+    const db = {
+      agent_jobs: [{
+        id: "job-20",
+        status: "running",
+        conversation_id: "conv-20",
+        worker_id: "w-20",
+        claim_token: "token-20"
+      }],
+      agent_results: [],
+      agent_events: []
+    };
+
+    const intermediateResult = {
+      conversationId: "conv-20",
+      responseText: "I have started background test suite and will wait.",
+      botMessage: {
+        role: "bot",
+        state: "done",
+        content: "I have started background test suite and will wait.",
+        tools: [{ name: "run_command", state: "done" }]
+      },
+      subagents: [],
+      tasks: [{ id: "task-1", name: "task-1", status: "running" }]
+    };
+
+    // Semantics: isJobTrulyComplete must be FALSE because a task is running
+    assert.strictEqual(isJobTrulyComplete(intermediateResult, false), false, "Job must not be complete when background tasks are running");
+
+    // Save intermediate progress
+    const saved = simulateSaveAgentJobProgress(
+      db, "job-20", "w-20", "token-20", "conv-20",
+      intermediateResult.responseText, intermediateResult.botMessage,
+      intermediateResult.subagents, intermediateResult.tasks
+    );
+    assert.strictEqual(saved, true, "Intermediate progress must save successfully");
+    assert.strictEqual(db.agent_jobs[0].status, "running", "Job status must remain running");
+
+    // private.wait_agent_job must return kind='progress', terminal=false, ready=false
+    const waitRes = simulateWaitAgentJob(db, "job-20", 0);
+    assert.strictEqual(waitRes.kind, "progress", "Wait result must be progress");
+    assert.strictEqual(waitRes.terminal, false, "Job must not be terminal");
+    assert.strictEqual(waitRes.ready, false, "Job must not be ready");
+    assert.strictEqual(waitRes.tasks.length, 1);
+    assert.strictEqual(waitRes.tasks[0].status, "running");
+    assert.strictEqual(waitRes.response_text, "I have started background test suite and will wait.");
+
+    console.log("✓ Test 20 passed: bot message done + task running => job remains running & reports progress");
+  }
+
+  // Test 21: task transitions done => job becomes completed
+  {
+    const db = {
+      agent_jobs: [{
+        id: "job-21",
+        status: "running",
+        conversation_id: "conv-21",
+        worker_id: "w-21",
+        claim_token: "token-21"
+      }],
+      agent_results: [],
+      agent_events: []
+    };
+
+    const intermediateResult = {
+      conversationId: "conv-21",
+      responseText: "Started tests...",
+      botMessage: { role: "bot", state: "done", content: "Started tests..." },
+      subagents: [],
+      tasks: [{ id: "task-2", name: "task-2", status: "running" }]
+    };
+    assert.strictEqual(isJobTrulyComplete(intermediateResult, false), false);
+
+    // Transition task to completed
+    const finalResult = {
+      conversationId: "conv-21",
+      responseText: "All tests passed successfully!",
+      botMessage: { role: "bot", state: "done", content: "All tests passed successfully!" },
+      subagents: [],
+      tasks: [{ id: "task-2", name: "task-2", status: "completed" }]
+    };
+    assert.strictEqual(isJobTrulyComplete(finalResult, false), true, "Job must be complete when all tasks transition to completed");
+
+    // Final completion in DB
+    const ok = simulateCompleteAgentJob(
+      db, "job-21", "w-21", "token-21", "conv-21",
+      finalResult.responseText, finalResult.botMessage,
+      finalResult.subagents, finalResult.tasks
+    );
+    assert.strictEqual(ok, true);
+    assert.strictEqual(db.agent_jobs[0].status, "completed");
+
+    const finalWait = simulateWaitAgentJob(db, "job-21", 0);
+    assert.strictEqual(finalWait.kind, "final");
+    assert.strictEqual(finalWait.terminal, true);
+    assert.strictEqual(finalWait.ready, true);
+    assert.strictEqual(finalWait.response_text, "All tests passed successfully!");
+    assert.strictEqual(finalWait.tasks[0].status, "completed");
+
+    console.log("✓ Test 21 passed: task transitions done => job becomes completed");
+  }
+
+  // Test 22: failed task => job failed only after task terminal
+  {
+    const db = {
+      agent_jobs: [{
+        id: "job-22",
+        status: "running",
+        conversation_id: "conv-22",
+        worker_id: "w-22",
+        claim_token: "token-22"
+      }],
+      agent_results: [],
+      agent_events: []
+    };
+
+    const runningResult = {
+      conversationId: "conv-22",
+      responseText: "Running compile...",
+      botMessage: { role: "bot", state: "done", content: "Running compile..." },
+      subagents: [],
+      tasks: [{ id: "task-3", name: "task-3", status: "running" }]
+    };
+    assert.strictEqual(isJobTrulyComplete(runningResult, false), false);
+
+    // Task finishes with failed status
+    const failedTaskResult = {
+      conversationId: "conv-22",
+      responseText: "Compilation failed with exit code 1",
+      botMessage: { role: "bot", state: "done", content: "Compilation failed with exit code 1" },
+      subagents: [],
+      tasks: [{ id: "task-3", name: "task-3", status: "failed" }]
+    };
+    // Once task is terminal (failed), isJobTrulyComplete is true (all active work settled)
+    assert.strictEqual(isJobTrulyComplete(failedTaskResult, false), true);
+
+    simulateCompleteAgentJob(
+      db, "job-22", "w-22", "token-22", "conv-22",
+      failedTaskResult.responseText, failedTaskResult.botMessage,
+      failedTaskResult.subagents, failedTaskResult.tasks
+    );
+
+    const waitRes = simulateWaitAgentJob(db, "job-22", 0);
+    assert.strictEqual(waitRes.kind, "final");
+    assert.strictEqual(waitRes.terminal, true);
+    assert.strictEqual(waitRes.tasks[0].status, "failed");
+
+    console.log("✓ Test 22 passed: failed task => job completes only after task is terminal");
+  }
+
+  // Test 23: no background tasks => ordinary quick response still completes normally
+  {
+    const db = {
+      agent_jobs: [{
+        id: "job-23",
+        status: "running",
+        conversation_id: "conv-23",
+        worker_id: "w-23",
+        claim_token: "token-23"
+      }],
+      agent_results: [],
+      agent_events: []
+    };
+
+    const quickResult = {
+      conversationId: "conv-23",
+      responseText: "Hello! Here is the answer to your question.",
+      botMessage: {
+        role: "bot",
+        state: "done",
+        content: "Hello! Here is the answer to your question.",
+        tools: []
+      },
+      subagents: [],
+      tasks: []
+    };
+
+    assert.strictEqual(isJobTrulyComplete(quickResult, false), true, "Job without background tasks must complete immediately on done");
+
+    const ok = simulateCompleteAgentJob(
+      db, "job-23", "w-23", "token-23", "conv-23",
+      quickResult.responseText, quickResult.botMessage,
+      quickResult.subagents, quickResult.tasks
+    );
+    assert.strictEqual(ok, true);
+
+    const waitRes = simulateWaitAgentJob(db, "job-23", 0);
+    assert.strictEqual(waitRes.kind, "final");
+    assert.strictEqual(waitRes.terminal, true);
+    assert.strictEqual(waitRes.ready, true);
+    assert.strictEqual(waitRes.response_text, "Hello! Here is the answer to your question.");
+
+    console.log("✓ Test 23 passed: no background tasks => ordinary quick response still completes normally");
+  }
+
+  // Test 24: manage_task tool-call being done is NOT equivalent to managed task being done
+  {
+    const resultWithDoneTool = {
+      conversationId: "conv-24",
+      responseText: "Launched task in background.",
+      botMessage: {
+        role: "bot",
+        state: "done",
+        content: "Launched task in background.",
+        tools: [
+          { name: "manage_task", state: "done", parameters: { Action: "list" } },
+          { name: "run_command", state: "done", parameters: { CommandLine: "npm test" } }
+        ]
+      },
+      subagents: [],
+      tasks: [{ id: "task-24", name: "task-24", status: "running" }]
+    };
+
+    // Tools have state: "done", but task has status: "running"
+    assert.strictEqual(hasActiveTools(resultWithDoneTool.botMessage), false, "manage_task tool itself is done");
+    assert.strictEqual(hasActiveTasks(resultWithDoneTool.tasks), true, "Managed task is still running");
+    assert.strictEqual(isJobTrulyComplete(resultWithDoneTool, false), false, "Job MUST NOT be complete when managed task is still running");
+
+    console.log("✓ Test 24 passed: manage_task tool-call being done is NOT equivalent to managed task being done");
+  }
+
+  // Test 25: active subagent keeps job running
+  {
+    const resultWithSubagent = {
+      conversationId: "conv-25",
+      responseText: "Subagent spawned.",
+      botMessage: {
+        role: "bot",
+        state: "done",
+        content: "Subagent spawned."
+      },
+      subagents: [{ id: "sub-1", role: "Codebase Researcher", status: "running" }],
+      tasks: []
+    };
+
+    assert.strictEqual(hasActiveSubagents(resultWithSubagent.subagents), true);
+    assert.strictEqual(isJobTrulyComplete(resultWithSubagent, false), false, "Active subagent must prevent premature job completion");
+
+    resultWithSubagent.subagents[0].status = "completed";
+    assert.strictEqual(hasActiveSubagents(resultWithSubagent.subagents), false);
+    assert.strictEqual(isJobTrulyComplete(resultWithSubagent, false), true, "Job completes once subagent is completed");
+
+    console.log("✓ Test 25 passed: active subagent keeps job running until subagent is terminal");
+  }
+
+  console.log("\nAll 25 test cases passed successfully!");
 }
 
 runTests();
+

@@ -422,7 +422,7 @@ async function getSubagentsForConversation(parentId) {
     for (const subId of subagentIds) {
       const subTranscript = path.join(BRAIN_DIR, subId, ".system_generated/logs/transcript.jsonl");
       let role = "Subagent";
-      let status = "completed";
+      let status = "running";
       let lastActivity = null;
       let stepCount = 0;
       if (fs.existsSync(subTranscript)) {
@@ -441,7 +441,18 @@ async function getSubagentsForConversation(parentId) {
               }
             }
           }
+          const lastLine = lines[lines.length - 1];
+          if (lastLine) {
+            try {
+              const lastObj = JSON.parse(lastLine);
+              if (lastObj.status === "DONE" && (lastObj.type === "PLANNER_RESPONSE" || lastObj.type === "USER_INPUT")) {
+                status = "completed";
+              }
+            } catch {}
+          }
         } catch (e) {}
+      } else {
+        status = "completed";
       }
       result.push({
         id: subId,
@@ -463,6 +474,50 @@ async function getTasksForConversation(convId) {
   const tasksDir = path.join(BRAIN_DIR, convId, ".system_generated", "tasks");
   if (!fs.existsSync(tasksDir)) return result;
 
+  const completedTaskIds = new Set();
+  const failedTaskIds = new Set();
+
+  const transcriptFile = path.join(BRAIN_DIR, convId, ".system_generated/logs/transcript.jsonl");
+  if (fs.existsSync(transcriptFile)) {
+    try {
+      const content = await fs.promises.readFile(transcriptFile, "utf-8");
+      for (const line of content.split("\n")) {
+        if (!line.trim()) continue;
+        try {
+          const obj = JSON.parse(line);
+          const c = String(obj.content || "");
+          const senderMatch = c.match(/sender=[^\s\/]+\/([^\s]+)/i);
+          const finishedMatch = c.match(/Task id "[^\"]+\/([^\"]+)" (finished|failed|cancelled)/i) ||
+                                c.match(/Task id "([^\"]+)" (finished|failed|cancelled)/i);
+          const tId = senderMatch ? senderMatch[1] : (finishedMatch ? (finishedMatch[1] || finishedMatch[2]) : null);
+          if (tId) {
+            if (c.includes("failed with") || c.includes("exited with code 1") || (finishedMatch && finishedMatch[2] === "failed")) {
+              failedTaskIds.add(tId);
+            } else {
+              completedTaskIds.add(tId);
+            }
+          }
+        } catch {}
+      }
+    } catch {}
+  }
+
+  const messagesDir = path.join(BRAIN_DIR, convId, ".system_generated", "messages");
+  if (fs.existsSync(messagesDir)) {
+    try {
+      const files = await fs.promises.readdir(messagesDir);
+      for (const f of files) {
+        if (!f.endsWith(".json") || f === "read.json") continue;
+        try {
+          const msgObj = JSON.parse(await fs.promises.readFile(path.join(messagesDir, f), "utf-8"));
+          const sender = String(msgObj.sourceMetadata?.tool?.toolCall?.id || msgObj.sender || "");
+          const match = sender.match(/\/([^\s]+)$/);
+          if (match) completedTaskIds.add(match[1]);
+        } catch {}
+      }
+    } catch {}
+  }
+
   try {
     const files = await fs.promises.readdir(tasksDir);
     for (const f of files) {
@@ -474,8 +529,18 @@ async function getTasksForConversation(convId) {
         const content = await fs.promises.readFile(fullPath, "utf-8");
         const lines = content.split("\n").filter(l => l.trim().length > 0);
         const tailLines = lines.slice(-30).join("\n");
-        const isRecent = (Date.now() - stats.mtimeMs) < 20000;
-        const status = isRecent && activeProcesses.has(convId) ? "running" : "completed";
+
+        let status = "running";
+        if (completedTaskIds.has(taskId)) {
+          status = "completed";
+        } else if (failedTaskIds.has(taskId)) {
+          status = "failed";
+        } else {
+          const isRecent = (Date.now() - stats.mtimeMs) < 60000;
+          if (!isRecent && (Date.now() - stats.mtimeMs) > 3600000) {
+            status = "completed";
+          }
+        }
 
         result.push({
           id: taskId,

@@ -96,7 +96,14 @@ Fields:
 - `tasks`: final task snapshot.
 - `created_at`: result write time.
 
-A `done` event in `agent_events` is diagnostic evidence, not by itself proof that the job is completed. Success requires `agent_jobs.status = 'completed'` and a matching `agent_results` row.
+A `done` event in `agent_events` or `bot_message.state == "done"` is diagnostic evidence of a turn, NOT by itself proof that the job is completed. A job may be completed ONLY when:
+1. The final assistant/bot message is done with non-empty response text.
+2. No `tasks` or `bot_message.tasks` entry has status `pending`, `running`, `claimed`, `queued`, or `in_progress`.
+3. No `subagents` entry has status `pending`, `running`, `claimed`, `queued`, or `in_progress`.
+4. No tool invocation is still pending or running (a `manage_task` or `run_command` tool call completing is not equivalent to the background task completing).
+5. The underlying AGY conversation/generation is no longer active (`isGenerating == false`).
+
+If a bot response appears while background tasks or subagents still run, the bridge persists it as an intermediate progress response into `agent_results` while keeping `agent_jobs.status = 'running'`. ChatGPT receives intermediate progress snapshots via `private.wait_agent_job` and continues waiting until `kind == 'final'`.
 
 ## Recovery and duplicate prevention
 
