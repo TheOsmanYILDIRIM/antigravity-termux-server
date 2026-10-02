@@ -1,0 +1,85 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -euo pipefail
+PROMPT="${*:-Sadece TAMAM yaz.}"
+OUT="/data/data/com.termux/files/home/agy_interactive_probe_$(date +%s).log"
+
+python3 - "$PROMPT" "$OUT" <<'PY'
+import os, pty, select, signal, sys, time, re
+
+prompt = sys.argv[1]
+out_path = sys.argv[2]
+agy = "/data/data/com.termux/files/usr/bin/agy"
+env = os.environ.copy()
+env["HOME"] = "/data/data/com.termux/files/home"
+env["AGY_AUTO_UPDATE"] = "0"
+
+pid, fd = pty.fork()
+if pid == 0:
+    os.chdir(env["HOME"])
+    os.execve(agy, [agy], env)
+
+start = time.monotonic()
+buf = b""
+sent = False
+first_after_send = None
+deadline = start + 90
+
+def write_log(data):
+    with open(out_path, "ab") as f:
+        f.write(data)
+
+try:
+    while time.monotonic() < deadline:
+        r,_,_ = select.select([fd], [], [], 0.1)
+        if r:
+            try:
+                data = os.read(fd, 65536)
+            except OSError:
+                break
+            if not data:
+                break
+            write_log(data)
+            buf += data
+            text = buf.decode("utf-8", "ignore")
+            # Wait until the interactive client has painted something that looks
+            # like its input UI before sending the prompt.
+            if not sent and (">" in text or "Antigravity" in text or "Gemini" in text):
+                os.write(fd, (prompt + "\n").encode())
+                sent = True
+                sent_at = time.monotonic()
+                buf = b""
+                print(f"PROMPT_SENT_MS={(sent_at-start)*1000:.1f}", flush=True)
+                continue
+            if sent and first_after_send is None:
+                # Ignore pure ANSI/control redraws and echoed prompt.
+                cleaned = re.sub(r'\x1b\[[0-9;?]*[ -/]*[@-~]', '', text)
+                cleaned = cleaned.replace(prompt, "").strip()
+                if cleaned:
+                    first_after_send = time.monotonic()
+                    print(f"FIRST_OUTPUT_AFTER_PROMPT_MS={(first_after_send-sent_at)*1000:.1f}", flush=True)
+                    break
+        elif not sent and time.monotonic() - start > 20:
+            # Fallback: send even if prompt marker wasn't recognized.
+            os.write(fd, (prompt + "\n").encode())
+            sent = True
+            sent_at = time.monotonic()
+            buf = b""
+            print(f"PROMPT_SENT_MS={(sent_at-start)*1000:.1f}", flush=True)
+finally:
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+if not sent:
+    print("ERROR=interactive_prompt_not_sent")
+    sys.exit(2)
+if first_after_send is None:
+    print("ERROR=no_output_within_timeout")
+    sys.exit(3)
+print(f"LOG={out_path}")
+PY
