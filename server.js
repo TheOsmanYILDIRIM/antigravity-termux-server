@@ -4069,10 +4069,9 @@ const server = http.createServer(async (req, res) => {
         }
 
         function handleChatExecution() {
-          if (!isBridgeClient) {
-            runOneShotChat();
-            return;
-          }
+          // Both mobile and bridge clients use the persistent worker while reuse
+          // diagnostics are enabled. This lets us verify whether the same warm
+          // AGY process is actually reused across turns.
 
           // Actions are explicit user-invoked shell shortcuts. Never run agy-auth
           // or any other Action implicitly in the chat message critical path.
