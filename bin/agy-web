@@ -50,6 +50,10 @@ case "$1" in
     "$0" start
     ;;
 
+  latency-test)
+    bash "$DIR/bin/agy-latency-test" "${@:2}"
+    ;;
+
   update)
     shift
     exec bash "$DIR/bin/agy-update" "$@"
@@ -87,6 +91,7 @@ case "$1" in
     echo "  agy-web start    -> Sunucuyu tmux arka planında başlatır"
     echo "  agy-web stop     -> Sunucuyu kapatır"
     echo "  agy-web restart  -> Yeniden başlatır"
+    echo "  agy-web latency-test [prompt] -> İstekten sonuca ayrıntılı gecikme ölçümü yapar"
     echo "  agy-web status   -> Çalışma durumunu ve PID gösterir"
     echo "  agy-web open     -> Tarayıcıda http://127.0.0.1:$PORT sayfasını açar"
     echo "  agy-web attach   -> Tmux log ekranına canlı bağlanır"
