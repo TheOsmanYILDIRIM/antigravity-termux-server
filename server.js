@@ -147,6 +147,15 @@ if (!fs.existsSync(VAULT_DIR)) fs.mkdirSync(VAULT_DIR, { recursive: true });
 
 const activeProcesses = new Map();
 const persistentWorkers = new Map();
+const WORKER_LIFECYCLE_LOG = "/data/data/com.termux/files/home/agy_worker_lifecycle.log";
+function logWorkerLifecycle(event, data = {}) {
+  fs.appendFile(WORKER_LIFECYCLE_LOG, JSON.stringify({
+    ts: new Date().toISOString(),
+    event,
+    ...data
+  }) + "\n", () => {});
+}
+
 let activeChildProcess = null;
 let authWaitingChildProcess = null;
 let pendingPkce = null;
@@ -3458,6 +3467,13 @@ const server = http.createServer(async (req, res) => {
                       this.convId = eventObj.conversation_id;
                       this.activeConvId = eventObj.conversation_id;
                       persistentWorkers.set(this.convId, this);
+                      logWorkerLifecycle("init_remap", {
+                        previousActiveConvId,
+                        convId: this.convId,
+                        requestId: this.currentRequestId || null,
+                        pid: child.pid || null,
+                        mapSize: persistentWorkers.size
+                      });
                       activeProcesses.set(this.activeConvId, { child, botMessage: this.currentBotMessage, activeConvId: this.activeConvId });
                       if (!this.isBridge) {
                         currentSession.conversationId = eventObj.conversation_id;
@@ -3623,7 +3639,13 @@ const server = http.createServer(async (req, res) => {
                         conversationId: resultConversationId || this.activeConvId,
                         requestId: this.currentRequestId
                       });
-                      this.isBusy = false;
+                      logWorkerLifecycle("turn_done", {
+                      convId: this.convId || null,
+                      requestId: this.currentRequestId || null,
+                      pid: child.pid || null,
+                      mapSize: persistentWorkers.size
+                    });
+                    this.isBusy = false;
                       if (!this.isBridge) {
                         currentSession.isGenerating = false;
                       }
@@ -4056,14 +4078,39 @@ const server = http.createServer(async (req, res) => {
           // or any other Action implicitly in the chat message critical path.
           const targetId = conversationId || (isBridgeClient ? null : currentSession.conversationId);
           let worker = targetId ? persistentWorkers.get(targetId) : null;
+          logWorkerLifecycle(worker ? "reuse_candidate" : "reuse_miss", {
+            targetId: targetId || null,
+            requestId: requestId || null,
+            mapSize: persistentWorkers.size,
+            workerConvId: worker ? (worker.convId || null) : null,
+            workerReady: worker ? Boolean(worker.isReady) : false,
+            workerBusy: worker ? Boolean(worker.isBusy) : false
+          });
 
           // If worker exists but config changed (model/effort/mode), destroy and re-create.
           if (worker && (worker.model !== model || worker.effort !== effort || worker.mode !== mode)) {
+            logWorkerLifecycle("destroy_config_change", {
+              targetId: targetId || null,
+              requestId: requestId || null,
+              oldModel: worker.model || "",
+              newModel: model || "",
+              oldEffort: worker.effort || "",
+              newEffort: effort || "",
+              oldMode: worker.mode || "",
+              newMode: mode || ""
+            });
             worker.destroy();
             worker = null;
           }
 
           if (!worker) {
+            logWorkerLifecycle("create_worker", {
+              targetId: targetId || null,
+              requestId: requestId || null,
+              model: model || "",
+              effort: effort || "",
+              mode: mode || ""
+            });
             worker = new PersistentWorker({
               convId: targetId,
               model: model,
@@ -4077,6 +4124,14 @@ const server = http.createServer(async (req, res) => {
             if (targetId) persistentWorkers.set(targetId, worker);
           }
 
+          logWorkerLifecycle("send_turn", {
+            targetId: targetId || null,
+            requestId: requestId || null,
+            workerConvId: worker.convId || null,
+            workerReady: Boolean(worker.isReady),
+            workerBusy: Boolean(worker.isBusy),
+            pid: worker.child && worker.child.pid ? worker.child.pid : null
+          });
           worker.sendTurn(fullPromptForAgy, botMessage, requestId);
         }
         handleChatExecution();
