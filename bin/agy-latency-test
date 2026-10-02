@@ -10,6 +10,25 @@ if [ -f "$LOG_FILE" ]; then START_LINE=$(( $(wc -l < "$LOG_FILE") + 1 )); fi
 
 echo "⚡ Latency probe başlatılıyor"
 echo "Trace: $TRACE_ID"
+
+echo "⏳ Server hazır olması bekleniyor..."
+READY=0
+for _ in $(seq 1 30); do
+  if curl -fsS "$BASE_URL/api/health" >/dev/null 2>&1; then
+    READY=1
+    break
+  fi
+  sleep 0.5
+done
+if [ "$READY" -ne 1 ]; then
+  echo "❌ Server 15 saniye içinde hazır olmadı."
+  echo "--- agy-web status ---"
+  agy-web status || true
+  echo "--- tmux son 80 satır ---"
+  tmux capture-pane -pt agy-web -S -80 2>/dev/null || true
+  exit 2
+fi
+
 RESP=$(curl -sS -X POST "$BASE_URL/api/chat" -H 'Content-Type: application/json' --data-binary "$(jq -nc --arg p "$PROMPT" --arg t "$TRACE_ID" '{prompt:$p,continue:false,client:"latency-probe",traceId:$t,useVault:false}')")
 echo "POST: $RESP"
 
