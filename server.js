@@ -3900,7 +3900,158 @@ const server = http.createServer(async (req, res) => {
           }
         }
 
+        function runOneShotChat() {
+          const args = [
+            "-p", fullPromptForAgy,
+            "--dangerously-skip-permissions",
+            "--output-format", "stream-json",
+            "--print-timeout", "60m"
+          ];
+          if (isContinue && conversationId) args.push("--conversation", conversationId);
+          if (model && model !== "default") args.push("--model", model);
+          if (effort && ["low", "medium", "high"].includes(effort.toLowerCase())) args.push("--effort", effort.toLowerCase());
+          if (mode && ["plan", "accept-edits"].includes(mode.toLowerCase())) args.push("--mode", mode.toLowerCase());
+          if (useVault && fs.existsSync(VAULT_DIR)) args.push("--add-dir", VAULT_DIR);
+          if (fs.existsSync(UPLOADS_DIR)) args.push("--add-dir", UPLOADS_DIR);
+
+          const env = {
+            ...process.env,
+            CODEVIBE_ALLOW_FILE_KEYCHAIN: "1",
+            HOME: "/data/data/com.termux/files/home",
+            PREFIX: "/data/data/com.termux/files/usr",
+            TMPDIR: "/data/data/com.termux/files/usr/tmp",
+            LANG: "en_US.UTF-8",
+            LC_ALL: "en_US.UTF-8",
+            PATH: process.env.PATH || "/data/data/com.termux/files/usr/bin:/data/data/com.termux/files/usr/bin/applets",
+            TERM: "xterm-256color",
+            PAGER: "cat",
+            SSL_CERT_FILE: "/data/data/com.termux/files/usr/etc/tls/cert.pem",
+            GODEBUG: "netdns=cgo",
+            AGY_AUTO_UPDATE: "0",
+            TERMUX_VERSION: process.env.TERMUX_VERSION || "0.118.0"
+          };
+          for (const k of ["HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","http_proxy","https_proxy","all_proxy","NODE_TLS_REJECT_UNAUTHORIZED","GIT_SSL_NO_VERIFY"]) delete env[k];
+
+          const agyPath = "/data/data/com.termux/files/usr/bin/agy";
+          latencyMark("spawn_start", { mode: "one-shot", model: model || "default", effort: effort || "default" });
+          const child = spawn(agyPath, args, {
+            cwd: process.env.HOME || "/data/data/com.termux/files/home",
+            env
+          });
+          latencyMark("spawned", { mode: "one-shot", pid: child.pid || null });
+
+          activeChildProcess = child;
+          activeProcesses.set(activeConvId, { child, botMessage, activeConvId });
+
+          let buffer = "";
+          let lastResultStatus = null;
+          let lastResultError = null;
+
+          child.stdout.on("data", (chunk) => {
+            latencyMarkOnce("first_stdout");
+            buffer += chunk.toString("utf-8");
+            const lines = buffer.split("\n");
+            buffer = lines.pop();
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (!trimmed) continue;
+              try {
+                const eventObj = JSON.parse(trimmed);
+                if (eventObj.event === "init") {
+                  latencyMarkOnce("init");
+                  if (eventObj.conversation_id) {
+                    activeProcesses.delete(activeConvId);
+                    activeConvId = String(eventObj.conversation_id);
+                    activeProcesses.set(activeConvId, { child, botMessage, activeConvId });
+                    currentSession.conversationId = activeConvId;
+                    currentSession.id = activeConvId;
+                    broadcastSSE("init", { conversationId: activeConvId, requestId });
+                  }
+                } else if (eventObj.event === "step_update") {
+                  latencyMarkOnce("first_step_update");
+                  const update = eventObj.step_update;
+                  if (!update) continue;
+                  if (update.text_delta) {
+                    latencyMarkOnce("first_text", { chars: String(update.text_delta).length });
+                    botMessage.content += update.text_delta;
+                    broadcastSSE("chunk", {
+                      text_delta: update.text_delta,
+                      full_content: botMessage.content,
+                      conversationId: activeConvId,
+                      requestId
+                    });
+                  }
+                  if (update.tool_name || update.tool_info) {
+                    const toolInfo = update.tool_info || update;
+                    const tool = {
+                      step_index: update.step_index,
+                      name: update.tool_name || toolInfo.name || toolInfo.tool_name || "tool",
+                      state: update.state || toolInfo.state || "ACTIVE",
+                      parameters: toolInfo.parameters || update.parameters || {},
+                      output: toolInfo.output || update.output || null,
+                      duration_seconds: update.duration_seconds || toolInfo.duration_seconds || null,
+                      error: toolInfo.error || update.error || null
+                    };
+                    const idx = botMessage.tools.findIndex(t => t.step_index === tool.step_index);
+                    if (idx >= 0) botMessage.tools[idx] = tool; else botMessage.tools.push(tool);
+                    broadcastSSE("tool_update", { tool, conversationId: activeConvId, requestId });
+                  }
+                  if (update.usage) botMessage.usage = update.usage;
+                } else if (eventObj.event === "result") {
+                  latencyMarkOnce("result");
+                  const r = eventObj.result || {};
+                  lastResultStatus = r.status ? String(r.status).toUpperCase() : null;
+                  lastResultError = r.error ? String(r.error) : null;
+                  if (r.response && (!botMessage.content || !botMessage.content.trim())) botMessage.content = r.response;
+                  if (r.usage) botMessage.usage = r.usage;
+                  if (r.conversation_id) {
+                    currentSession.conversationId = String(r.conversation_id);
+                    currentSession.id = String(r.conversation_id);
+                    activeConvId = String(r.conversation_id);
+                  }
+                }
+              } catch (e) {}
+            }
+          });
+
+          child.stderr.on("data", (chunk) => {
+            broadcastSSE("stderr", { text: chunk.toString("utf-8"), conversationId: activeConvId, requestId });
+          });
+
+          child.on("error", (err) => {
+            activeProcesses.delete(activeConvId);
+            if (activeChildProcess === child) activeChildProcess = null;
+            currentSession.isGenerating = false;
+            botMessage.state = "error";
+            botMessage.content += "\n\n⚠️ *Hata: " + err.message + "*";
+            broadcastSSE("error", { error: err.message, conversationId: activeConvId, requestId });
+            broadcastSSE("generating_done", { conversationId: activeConvId, isGenerating: false, requestId });
+          });
+
+          child.on("close", (code, signal) => {
+            latencyMarkOnce("close", { code, signal: signal || null });
+            activeProcesses.delete(activeConvId);
+            if (activeChildProcess === child) activeChildProcess = null;
+            currentSession.isGenerating = false;
+            if (lastResultStatus === "SUCCESS" || (code === 0 && botMessage.content && botMessage.content.trim())) {
+              botMessage.state = "done";
+              broadcastSSE("done", { exitCode: code, botMessage, conversationId: activeConvId, requestId });
+            } else {
+              botMessage.state = "error";
+              const errMsg = lastResultError || ("Üretim başarısız oldu (exit " + code + ")");
+              if (!botMessage.content || !botMessage.content.trim()) botMessage.content = "⚠️ *" + errMsg + "*";
+              broadcastSSE("error", { error: errMsg, exitCode: code, conversationId: activeConvId, requestId });
+            }
+            broadcastSSE("generating_done", { conversationId: activeConvId, isGenerating: false, requestId });
+          });
+        }
+
         function handleChatExecution() {
+          if (!isBridgeClient) {
+            runOneShotChat();
+            return;
+          }
+
           // Actions are explicit user-invoked shell shortcuts. Never run agy-auth
           // or any other Action implicitly in the chat message critical path.
           const targetId = conversationId || (isBridgeClient ? null : currentSession.conversationId);
