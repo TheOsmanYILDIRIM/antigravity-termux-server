@@ -3357,6 +3357,15 @@ const server = http.createServer(async (req, res) => {
             this.idleTimer = null;
             this.initWaiters = [];
             this.diagRssTimer = null;
+            this.turnTrace = null;
+          }
+
+          traceMark(stage, extra = {}) {
+            if (this.turnTrace && typeof this.turnTrace.mark === "function") this.turnTrace.mark(stage, extra);
+          }
+
+          traceMarkOnce(stage, extra = {}) {
+            if (this.turnTrace && typeof this.turnTrace.markOnce === "function") this.turnTrace.markOnce(stage, extra);
           }
 
           start(attempt = 1) {
@@ -3414,7 +3423,7 @@ const server = http.createServer(async (req, res) => {
             }
 
             const agyPath = "/data/data/com.termux/files/usr/bin/agy";
-            latencyMark("spawn_start", { model: this.model || "default", effort: this.effort || "default" });
+            this.traceMark("spawn_start", { model: this.model || "default", effort: this.effort || "default" });
             const child = spawn(agyPath, args, {
               cwd: process.env.HOME || "/data/data/com.termux/files/home",
               env: env
@@ -3422,7 +3431,7 @@ const server = http.createServer(async (req, res) => {
 
             this.child = child;
             activeChildProcess = child;
-            latencyMark("spawned", { pid: child.pid || null });
+            this.traceMark("spawned", { pid: child.pid || null });
 
             this.diagStartTs = Date.now();
             this.diagRssTimer = setInterval(() => {
@@ -3437,13 +3446,12 @@ const server = http.createServer(async (req, res) => {
                 fs.appendFileSync("/data/data/com.termux/files/home/agy_diag.log",
                   `[${new Date().toISOString()}] spawn persistent pid=${child.pid} attempt=${attempt} convId=${this.convId} mem=${Math.round(process.memoryUsage().rss/1048576)}MB\n`);
               } catch (e) {}
-              exec("taskset -p -c 0-5 " + child.pid + " 2>/dev/null; renice 15 -p " + child.pid + " 2>/dev/null");
             }
 
             child.stdout.on("data", async (chunk) => {
-              latencyMarkOnce("first_stdout");
+              this.traceMarkOnce("first_stdout");
               const raw = chunk.toString("utf-8");
-              try { fs.appendFileSync("/data/data/com.termux/files/home/agy_stdout.log", raw); } catch (e) {}
+              if (process.env.AGY_STREAM_DEBUG === "1") fs.appendFile("/data/data/com.termux/files/home/agy_stdout.log", raw, () => {});
               this.buffer += raw;
 
               const lines = this.buffer.split("\n");
@@ -3459,7 +3467,7 @@ const server = http.createServer(async (req, res) => {
                   this.hasReceivedJsonEvents = true;
 
                   if (eventObj.event === "init") {
-                    latencyMarkOnce("init");
+                    this.traceMarkOnce("init");
                     if (eventObj.conversation_id) {
                       const previousActiveConvId = this.activeConvId;
                       activeProcesses.delete(previousActiveConvId);
@@ -3496,12 +3504,12 @@ const server = http.createServer(async (req, res) => {
                       try { cb(); } catch (e) {}
                     }
                   } else if (eventObj.event === "step_update") {
-                    latencyMarkOnce("first_step_update");
+                    this.traceMarkOnce("first_step_update");
                     const update = eventObj.step_update;
                     if (!update) continue;
 
                     if (update.text_delta && this.currentBotMessage) {
-                      latencyMarkOnce("first_text", { chars: String(update.text_delta).length });
+                      this.traceMarkOnce("first_text", { chars: String(update.text_delta).length });
                       this.hasStreamedChunk = true;
                       this.currentBotMessage.content += update.text_delta;
                       broadcastSSE("chunk", {
@@ -3589,7 +3597,7 @@ const server = http.createServer(async (req, res) => {
                       });
                     }
                   } else if (eventObj.event === "result") {
-                    latencyMarkOnce("result");
+                    this.traceMarkOnce("result");
                     const resObj = eventObj.result;
                     const resultStatus = (resObj && resObj.status) ? String(resObj.status).toUpperCase() : null;
                     const resultError = (resObj && resObj.error)
@@ -3756,6 +3764,7 @@ const server = http.createServer(async (req, res) => {
                     activeProcesses.delete(this.activeConvId);
                     broadcastSSE("generating_done", { conversationId: this.activeConvId, isGenerating: false, requestId: this.currentRequestId });
                     this.resetIdleTimer();
+                    this.turnTrace = null;
                   }
                 } catch (err) {}
               }
@@ -3764,7 +3773,7 @@ const server = http.createServer(async (req, res) => {
             child.stderr.on("data", (chunk) => {
               const stderrText = chunk.toString("utf-8");
               this.lastEventTs = Date.now();
-              try { fs.appendFileSync("/data/data/com.termux/files/home/agy_stderr.log", stderrText); } catch (e) {}
+              if (process.env.AGY_STREAM_DEBUG === "1") fs.appendFile("/data/data/com.termux/files/home/agy_stderr.log", stderrText, () => {});
 
               const authUrlMatch = stderrText.match(/https:\/\/accounts\.google\.com\/o\/oauth2\/auth\S+/);
               if (authUrlMatch) {
@@ -3795,7 +3804,7 @@ const server = http.createServer(async (req, res) => {
             });
 
             child.on("close", (code, signal) => {
-              latencyMarkOnce("close", { code, signal: signal || null });
+              this.traceMarkOnce("close", { code, signal: signal || null });
               const wasBusy = this.isBusy;
               this.cleanup();
 
@@ -3832,8 +3841,9 @@ const server = http.createServer(async (req, res) => {
             });
           }
 
-          sendTurn(promptText, botMsg, requestId = null) {
-            this.currentRequestId = requestId || this.currentRequestId || null;
+          sendTurn(promptText, botMsg, requestId = null, turnTrace = null) {
+            this.currentRequestId = requestId || null;
+            this.turnTrace = turnTrace;
             this.currentBotMessage = botMsg;
             this.currentPrompt = promptText;
             this.isBusy = true;
@@ -3858,14 +3868,14 @@ const server = http.createServer(async (req, res) => {
 
           writePayload(promptText) {
             try {
-              latencyMark("prompt_write_start", { chars: String(promptText || "").length });
+              this.traceMark("prompt_write_start", { chars: String(promptText || "").length });
               const payload = JSON.stringify({
                 event: "user",
                 message: {
                   content: [{ type: "text", text: promptText }]
                 }
               }) + "\n";
-              this.child.stdin.write(payload, () => latencyMarkOnce("prompt_write_flushed"));
+              this.child.stdin.write(payload, () => this.traceMarkOnce("prompt_write_flushed"));
             } catch (e) {
               const failedConvId = this.activeConvId;
               const failedRequestId = this.currentRequestId;
@@ -4131,7 +4141,10 @@ const server = http.createServer(async (req, res) => {
             workerBusy: Boolean(worker.isBusy),
             pid: worker.child && worker.child.pid ? worker.child.pid : null
           });
-          worker.sendTurn(fullPromptForAgy, botMessage, requestId);
+          worker.sendTurn(fullPromptForAgy, botMessage, requestId, {
+            mark: latencyMark,
+            markOnce: latencyMarkOnce
+          });
         }
         handleChatExecution();
 
