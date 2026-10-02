@@ -3132,6 +3132,20 @@ const server = http.createServer(async (req, res) => {
     req.on("end", () => {
       try {
         const data = JSON.parse(body || "{}");
+        const latencyTraceId = String(data.traceId || ("lat_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8)));
+        const latencyT0 = process.hrtime.bigint();
+        const latencyLogPath = "/data/data/com.termux/files/home/agy_latency.log";
+        const latencySeen = new Set();
+        const latencyMark = (stage, extra = {}) => {
+          const elapsedMs = Number(process.hrtime.bigint() - latencyT0) / 1e6;
+          fs.appendFile(latencyLogPath, JSON.stringify({ ts: new Date().toISOString(), traceId: latencyTraceId, stage, elapsedMs: Math.round(elapsedMs * 10) / 10, ...extra }) + "\n", () => {});
+        };
+        const latencyMarkOnce = (stage, extra = {}) => {
+          if (latencySeen.has(stage)) return;
+          latencySeen.add(stage);
+          latencyMark(stage, extra);
+        };
+        latencyMark("request_received");
         const requestId = typeof data.requestId === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(data.requestId)
           ? data.requestId
           : null;
@@ -3247,6 +3261,7 @@ const server = http.createServer(async (req, res) => {
         }
 
         const fullPromptForAgy = (clientContextInstruction + prompt + attachmentNotice).trim();
+        latencyMark("prompt_prepared", { promptChars: fullPromptForAgy.length, continueChat: Boolean(continueChat), bridgeClient: Boolean(isBridgeClient) });
 
         const isContinue = continueChat && Boolean(conversationId);
         let botMessage = null;
@@ -3303,7 +3318,7 @@ const server = http.createServer(async (req, res) => {
 
         if (!res.headersSent) {
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ status: "accepted", prompt, requestId }));
+          res.end(JSON.stringify({ status: "accepted", prompt, requestId, traceId: latencyTraceId }));
         }
 
         class PersistentWorker {
@@ -3390,6 +3405,7 @@ const server = http.createServer(async (req, res) => {
             }
 
             const agyPath = "/data/data/com.termux/files/usr/bin/agy";
+            latencyMark("spawn_start", { model: this.model || "default", effort: this.effort || "default" });
             const child = spawn(agyPath, args, {
               cwd: process.env.HOME || "/data/data/com.termux/files/home",
               env: env
@@ -3397,6 +3413,7 @@ const server = http.createServer(async (req, res) => {
 
             this.child = child;
             activeChildProcess = child;
+            latencyMark("spawned", { pid: child.pid || null });
 
             this.diagStartTs = Date.now();
             this.diagRssTimer = setInterval(() => {
@@ -3415,6 +3432,7 @@ const server = http.createServer(async (req, res) => {
             }
 
             child.stdout.on("data", async (chunk) => {
+              latencyMarkOnce("first_stdout");
               const raw = chunk.toString("utf-8");
               try { fs.appendFileSync("/data/data/com.termux/files/home/agy_stdout.log", raw); } catch (e) {}
               this.buffer += raw;
@@ -3432,6 +3450,7 @@ const server = http.createServer(async (req, res) => {
                   this.hasReceivedJsonEvents = true;
 
                   if (eventObj.event === "init") {
+                    latencyMarkOnce("init");
                     if (eventObj.conversation_id) {
                       const previousActiveConvId = this.activeConvId;
                       activeProcesses.delete(previousActiveConvId);
@@ -3461,10 +3480,12 @@ const server = http.createServer(async (req, res) => {
                       try { cb(); } catch (e) {}
                     }
                   } else if (eventObj.event === "step_update") {
+                    latencyMarkOnce("first_step_update");
                     const update = eventObj.step_update;
                     if (!update) continue;
 
                     if (update.text_delta && this.currentBotMessage) {
+                      latencyMarkOnce("first_text", { chars: String(update.text_delta).length });
                       this.hasStreamedChunk = true;
                       this.currentBotMessage.content += update.text_delta;
                       broadcastSSE("chunk", {
@@ -3552,6 +3573,7 @@ const server = http.createServer(async (req, res) => {
                       });
                     }
                   } else if (eventObj.event === "result") {
+                    latencyMarkOnce("result");
                     const resObj = eventObj.result;
                     const resultStatus = (resObj && resObj.status) ? String(resObj.status).toUpperCase() : null;
                     const resultError = (resObj && resObj.error)
@@ -3751,6 +3773,7 @@ const server = http.createServer(async (req, res) => {
             });
 
             child.on("close", (code, signal) => {
+              latencyMarkOnce("close", { code, signal: signal || null });
               const wasBusy = this.isBusy;
               this.cleanup();
 
@@ -3813,13 +3836,14 @@ const server = http.createServer(async (req, res) => {
 
           writePayload(promptText) {
             try {
+              latencyMark("prompt_write_start", { chars: String(promptText || "").length });
               const payload = JSON.stringify({
                 event: "user",
                 message: {
                   content: [{ type: "text", text: promptText }]
                 }
               }) + "\n";
-              this.child.stdin.write(payload);
+              this.child.stdin.write(payload, () => latencyMarkOnce("prompt_write_flushed"));
             } catch (e) {
               const failedConvId = this.activeConvId;
               const failedRequestId = this.currentRequestId;
