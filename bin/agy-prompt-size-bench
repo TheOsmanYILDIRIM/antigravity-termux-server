@@ -1,0 +1,84 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -euo pipefail
+MODEL="${AGY_TEST_MODEL:-gemini-3.7-flash-medium}"
+EFFORT="${AGY_TEST_EFFORT:-medium}"
+OUT="/data/data/com.termux/files/home/agy_prompt_size_$(date +%s).log"
+
+python3 - "$MODEL" "$EFFORT" "$OUT" <<'PY'
+import json, os, subprocess, sys, time, threading, queue
+
+model, effort, out_path = sys.argv[1:4]
+agy = "/data/data/com.termux/files/usr/bin/agy"
+env = os.environ.copy()
+env["HOME"] = "/data/data/com.termux/files/home"
+env["AGY_AUTO_UPDATE"] = "0"
+
+mobile_prefix = """[Ortam Bilgisi & İstemci: Antigravity Android Mobil Uygulaması]
+[Mobil Önizleme ve Formatlama Kuralları:
+1. Dinamik Oturum Başlığı ve Proje Etiketi: Yanıtınızın KESİNLİKLE İLK SATIRINA konuyu özetleyen kısa bir başlığı uygun metadata etiketiyle ekleyin.
+2. Dosya ve Kod Bağlantıları: Referans verilen dosyaları tıklanabilir file:// bağlantılarıyla verin.
+3. Görseller & Şemalar: Görselleri Markdown görsel etiketiyle verin.
+4. Uyarı & Vurgu Kutuları: GitHub callout formatını kullanın.
+5. Mermaid Şemaları: Dikey flowchart kullanın.
+6. Tablolar & Veri Listeleri: Mobil uyumlu kompakt çıktı kullanın.
+7. Net & Mobil Uyumlu Çıktı: Gereksiz dolgu metninden kaçının.
+8. Etkileşimli seçimlerde numaralı seçenekler kullanın.
+9. Çoklu seçimlerde Markdown checklist kullanın.
+10. Uzun görevlerde nihai sonuç gelmeden turu bitirmeyin.
+11. Alt-ajan veya arka plan görevi bitmeden yarım yanıt dönmeyin.]
+"""
+
+p = subprocess.Popen(
+    [agy, "--input-format","stream-json","--output-format","stream-json",
+     "--dangerously-skip-permissions","--print-timeout","60m",
+     "--model",model,"--effort",effort],
+    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    text=True, bufsize=1, cwd=env["HOME"], env=env,
+)
+
+events = queue.Queue()
+def reader(stream, kind):
+    for line in stream:
+        with open(out_path, "a", encoding="utf-8") as f:
+            f.write(kind+" "+line)
+        if kind=="OUT":
+            try: events.put(json.loads(line))
+            except: pass
+threading.Thread(target=reader,args=(p.stdout,"OUT"),daemon=True).start()
+threading.Thread(target=reader,args=(p.stderr,"ERR"),daemon=True).start()
+
+t0=time.monotonic()
+while True:
+    obj=events.get(timeout=90)
+    if obj.get("event")=="init":
+        print(f"INIT_MS={(time.monotonic()-t0)*1000:.1f}", flush=True)
+        break
+
+tests=[
+ ("short","Sadece KISA yaz."),
+ ("mobile",mobile_prefix+"Sadece MOBIL yaz."),
+ ("long",mobile_prefix*3+"Sadece UZUN yaz."),
+]
+for idx,(name,prompt) in enumerate(tests,1):
+    payload={"event":"user","message":{"content":[{"type":"text","text":prompt}]}}
+    start=time.monotonic()
+    p.stdin.write(json.dumps(payload,ensure_ascii=False)+"\n"); p.stdin.flush()
+    first_step=first_text=result=None
+    while True:
+        obj=events.get(timeout=120); ev=obj.get("event"); now=time.monotonic()
+        if ev=="step_update":
+            if first_step is None: first_step=(now-start)*1000
+            upd=obj.get("step_update") or {}
+            if upd.get("text_delta") and first_text is None: first_text=(now-start)*1000
+        elif ev=="result":
+            result=(now-start)*1000
+            r=obj.get("result") or {}
+            print(f"CASE={name} CHARS={len(prompt)} FIRST_STEP_MS={first_step if first_step is not None else -1:.1f} FIRST_TEXT_MS={first_text if first_text is not None else -1:.1f} RESULT_MS={result:.1f} RESPONSE={r.get('response')!r}", flush=True)
+            break
+
+try: p.stdin.close()
+except: pass
+try: p.terminate()
+except: pass
+print(f"LOG={out_path}")
+PY
