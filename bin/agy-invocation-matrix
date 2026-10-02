@@ -1,0 +1,82 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -u
+PROMPT="${*:-Sadece TAMAM yaz.}"
+AGY_BIN="/data/data/com.termux/files/usr/bin/agy"
+HOME_DIR="/data/data/com.termux/files/home"
+REPO_DIR="$HOME_DIR/antigravity-termux-server"
+VAULT_DIR="$HOME_DIR/agy-vault"
+UPLOADS_DIR="$HOME_DIR/uploads"
+STAMP="$(date +%s)"
+REPORT="$HOME_DIR/agy_invocation_matrix_${STAMP}.log"
+
+run_case() {
+  local name="$1"; local cwd="$2"; shift 2
+  local out="$HOME_DIR/.agy_matrix_${name}_${STAMP}.out"
+  local err="$HOME_DIR/.agy_matrix_${name}_${STAMP}.err"
+  rm -f "$out" "$err"
+  local start_ns end_ns first_ms total_ms pid
+  start_ns=$(date +%s%N)
+  (
+    cd "$cwd" || exit 97
+    "$@"
+  ) >"$out" 2>"$err" &
+  pid=$!
+  first_ms=""
+  for _ in $(seq 1 1600); do
+    if [ -s "$out" ] || [ -s "$err" ]; then
+      local now_ns
+      now_ns=$(date +%s%N)
+      first_ms=$(( (now_ns - start_ns) / 1000000 ))
+      break
+    fi
+    if ! kill -0 "$pid" 2>/dev/null; then break; fi
+    sleep 0.05
+  done
+  wait "$pid"; local rc=$?
+  end_ns=$(date +%s%N)
+  total_ms=$(( (end_ns - start_ns) / 1000000 ))
+  [ -z "$first_ms" ] && first_ms="-1"
+  {
+    echo "CASE=$name"
+    echo "CWD=$cwd"
+    echo "FIRST_OUTPUT_MS=$first_ms"
+    echo "TOTAL_MS=$total_ms"
+    echo "EXIT=$rc"
+    echo "STDOUT_HEAD:"
+    head -c 300 "$out"; echo
+    echo "STDERR_HEAD:"
+    head -c 300 "$err"; echo
+    echo "----"
+  } | tee -a "$REPORT"
+}
+
+echo "AGY invocation matrix" | tee "$REPORT"
+echo "Prompt: $PROMPT" | tee -a "$REPORT"
+echo | tee -a "$REPORT"
+
+echo "1/6 Düz CLI, HOME..."
+run_case plain_home "$HOME_DIR" "$AGY_BIN" -p "$PROMPT"
+
+echo "2/6 Düz CLI, repo cwd..."
+run_case plain_repo "$REPO_DIR" "$AGY_BIN" -p "$PROMPT"
+
+echo "3/6 permissions flag, HOME..."
+run_case perms_home "$HOME_DIR" "$AGY_BIN" -p "$PROMPT" --dangerously-skip-permissions
+
+echo "4/6 stream-json, HOME..."
+run_case stream_home "$HOME_DIR" "$AGY_BIN" -p "$PROMPT" --dangerously-skip-permissions --output-format stream-json --print-timeout 60m
+
+echo "5/6 stream-json + add-dir, HOME..."
+ARGS=(-p "$PROMPT" --dangerously-skip-permissions --output-format stream-json --print-timeout 60m)
+[ -d "$VAULT_DIR" ] && ARGS+=(--add-dir "$VAULT_DIR")
+[ -d "$UPLOADS_DIR" ] && ARGS+=(--add-dir "$UPLOADS_DIR")
+run_case stream_adddirs_home "$HOME_DIR" "$AGY_BIN" "${ARGS[@]}"
+
+echo "6/6 server-like scheduling + stream-json + add-dir..."
+run_case server_full "$HOME_DIR" nice -n 10 taskset -c 0-5 "$AGY_BIN" "${ARGS[@]}"
+
+echo
+echo "=== KARŞILAŞTIRMA ==="
+grep -E '^(CASE|CWD|FIRST_OUTPUT_MS|TOTAL_MS|EXIT)=' "$REPORT"
+echo
+echo "Rapor: $REPORT"
