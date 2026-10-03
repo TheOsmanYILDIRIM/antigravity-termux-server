@@ -374,6 +374,17 @@ begin
     'status',v.status,
     'terminal',v.status in ('completed','failed','cancelled'),
     'snapshot_active',v.snapshot_active,
+    'resume_required',(v.status='completed' and v.snapshot_active),
+    'resume_action',case
+      when v.status='completed' and v.snapshot_active then
+        jsonb_build_object(
+          'rpc','public.resume_resumable_agent_job',
+          'job_id',v.id,
+          'replay_prompt',false,
+          'instruction','Call this RPC once, then wait on the same job_id. Do not create a replacement job.'
+        )
+      else null
+    end,
     'conversation_id',v.conversation_id,
     'worker_id',v.worker_id,
     'attempts',v.attempts,
