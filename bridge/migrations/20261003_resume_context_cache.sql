@@ -294,6 +294,106 @@ $;
 grant execute on function private.write_agent_result(uuid,text,text,jsonb,jsonb,jsonb)
   to anon,service_role;
 
+
+create or replace function public.find_resumable_agent_job(
+  p_requested_by text default 'chatgpt',
+  p_resume_key text default null
+) returns jsonb
+language plpgsql
+security invoker
+set search_path=public,private
+as $
+declare
+  v record;
+begin
+  select
+    j.id,j.idempotency_key,j.requested_by,j.status,j.request,j.conversation_id,j.worker_id,
+    j.attempts,j.heartbeat_at,j.lease_expires_at,j.started_at,j.completed_at,j.created_at,
+    j.updated_at,j.error,r.response_text,r.bot_message,
+    coalesce(r.subagents,'[]'::jsonb) as subagents,
+    coalesce(r.tasks,'[]'::jsonb) as tasks,
+    private.agent_snapshot_has_active(
+      r.bot_message,coalesce(r.subagents,'[]'::jsonb),coalesce(r.tasks,'[]'::jsonb)
+    ) as snapshot_active,
+    c.resume_key as cached_resume_key,
+    c.resume_title as cached_resume_title,
+    c.goal as cached_goal,
+    c.summary as cached_summary,
+    c.next_step as cached_next_step,
+    c.context as cached_context,
+    c.source as cached_source,
+    c.version as cached_version,
+    c.updated_at as cache_updated_at
+  into v
+  from public.agent_jobs j
+  left join public.agent_results r on r.job_id=j.id
+  left join public.agent_resume_cache c on c.job_id=j.id
+  where j.requested_by=coalesce(nullif(p_requested_by,''),'chatgpt')
+    and (
+      p_resume_key is null
+      or j.idempotency_key=p_resume_key
+      or j.request->>'resumeKey'=p_resume_key
+      or c.resume_key=p_resume_key
+    )
+    and (
+      j.status in ('pending','claimed','running')
+      or (
+        j.status='completed'
+        and private.agent_snapshot_has_active(
+          r.bot_message,coalesce(r.subagents,'[]'::jsonb),coalesce(r.tasks,'[]'::jsonb)
+        )
+      )
+    )
+  order by
+    case
+      when private.agent_snapshot_has_active(
+        r.bot_message,coalesce(r.subagents,'[]'::jsonb),coalesce(r.tasks,'[]'::jsonb)
+      ) then 0
+      when j.status in ('pending','claimed','running') then 1
+      else 2
+    end,
+    j.updated_at desc,
+    j.created_at desc
+  limit 1;
+
+  if not found then return jsonb_build_object('found',false); end if;
+
+  return jsonb_build_object(
+    'found',true,
+    'job_id',v.id,
+    'idempotency_key',v.idempotency_key,
+    'resume_key',coalesce(v.cached_resume_key,v.request->>'resumeKey',v.idempotency_key),
+    'resume_title',coalesce(v.cached_resume_title,v.request->>'resumeTitle',left(v.request->>'prompt',160)),
+    'resume_summary',coalesce(v.cached_summary,''),
+    'resume_goal',coalesce(v.cached_goal,''),
+    'next_step',coalesce(v.cached_next_step,''),
+    'resume_context',coalesce(v.cached_context,'{}'::jsonb),
+    'resume_cache_source',v.cached_source,
+    'resume_cache_version',v.cached_version,
+    'resume_cache_updated_at',v.cache_updated_at,
+    'status',v.status,
+    'terminal',v.status in ('completed','failed','cancelled'),
+    'snapshot_active',v.snapshot_active,
+    'conversation_id',v.conversation_id,
+    'worker_id',v.worker_id,
+    'attempts',v.attempts,
+    'heartbeat_at',v.heartbeat_at,
+    'lease_expires_at',v.lease_expires_at,
+    'started_at',v.started_at,
+    'completed_at',v.completed_at,
+    'updated_at',v.updated_at,
+    'error',v.error,
+    'response_text',coalesce(v.response_text,''),
+    'bot_message',v.bot_message,
+    'subagents',v.subagents,
+    'tasks',v.tasks
+  );
+end;
+$;
+
+revoke all on function public.find_resumable_agent_job(text,text) from public,authenticated;
+grant execute on function public.find_resumable_agent_job(text,text) to anon,service_role;
+
 -- Backfill cache from all existing jobs/results.
 select private.refresh_agent_resume_cache(
   j.id,
