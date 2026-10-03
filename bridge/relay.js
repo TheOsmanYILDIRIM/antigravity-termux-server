@@ -703,13 +703,27 @@ async function recoverStale() {
 }
 
 async function agyAvailableCapacity() {
+  let healthOk = false;
   try {
     const h = await agy("GET", "/api/health", undefined, 3000);
-    if (h?.status !== "ok") return 0;
+    healthOk = h?.status === "ok";
+    if (!healthOk) return 0;
+
     const s = await agy("GET", "/api/status", undefined, 3000);
-    if (typeof s?.availableCapacity === "number") return s.availableCapacity;
+    if (typeof s?.availableCapacity === "number") {
+      const capacity = Math.max(0, Math.floor(s.availableCapacity));
+      if (capacity === 0 && Number(s?.activeCount || 0) === 0) {
+        log("WARN", "AGY reported zero capacity with no active processes; allowing one probe slot");
+        return 1;
+      }
+      return capacity;
+    }
     return s?.busy ? 0 : 1;
-  } catch {
+  } catch (e) {
+    if (healthOk) {
+      log("WARN", "AGY status probe failed after healthy response; allowing one probe slot", errJson(e));
+      return 1;
+    }
     return 0;
   }
 }
