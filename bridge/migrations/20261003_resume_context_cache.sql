@@ -252,6 +252,48 @@ $$;
 revoke all on function public.get_agent_resume_context(uuid,text) from public,authenticated;
 grant execute on function public.get_agent_resume_context(uuid,text) to anon,service_role;
 
+
+-- Make every progress/final snapshot refresh the compact resume cache automatically.
+create or replace function private.write_agent_result(
+  p_job_id uuid,
+  p_conversation_id text,
+  p_response_text text,
+  p_bot_message jsonb,
+  p_subagents jsonb,
+  p_tasks jsonb
+) returns void
+language plpgsql
+security definer
+set search_path = private, public
+as $
+begin
+  insert into public.agent_results(job_id,conversation_id,response_text,bot_message,subagents,tasks,created_at)
+  values(
+    p_job_id,
+    nullif(p_conversation_id,''),
+    coalesce(p_response_text,''),
+    p_bot_message,
+    coalesce(p_subagents,'[]'::jsonb),
+    coalesce(p_tasks,'[]'::jsonb),
+    now()
+  )
+  on conflict(job_id) do update set
+    conversation_id=excluded.conversation_id,
+    response_text=excluded.response_text,
+    bot_message=excluded.bot_message,
+    subagents=excluded.subagents,
+    tasks=excluded.tasks,
+    created_at=excluded.created_at;
+
+  perform private.refresh_agent_resume_cache(
+    p_job_id,p_conversation_id,p_response_text,p_bot_message,p_subagents,p_tasks,'bridge'
+  );
+end;
+$;
+
+grant execute on function private.write_agent_result(uuid,text,text,jsonb,jsonb,jsonb)
+  to anon,service_role;
+
 -- Backfill cache from all existing jobs/results.
 select private.refresh_agent_resume_cache(
   j.id,
