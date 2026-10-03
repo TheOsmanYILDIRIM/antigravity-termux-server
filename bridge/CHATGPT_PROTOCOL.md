@@ -242,3 +242,51 @@ For bridge schema or migration updates:
 - CI syntax checks on JavaScript/shell scripts do not validate PostgreSQL runtime syntax or behavior.
 - Validate SQL migrations against a real PostgreSQL/Supabase database (invoking newly added functions/RPCs and testing privilege boundaries) before declaring migrations complete.
 - Preserve actual runtime errors when validation fails instead of relying solely on static inspection.
+
+
+## Cross-chat resume
+
+Long-running AGY work is durable independently of a ChatGPT turn or chat thread.
+
+For long jobs, callers SHOULD include stable descriptive metadata in the stored request:
+
+```json
+{
+  "resumeKey": "stable-logical-work-key",
+  "resumeTitle": "Short human-readable task title"
+}
+```
+
+These fields are metadata only; relay execution semantics are unchanged.
+
+Before creating a replacement long-running job—especially in a new ChatGPT chat—call:
+
+```sql
+select public.find_resumable_agent_job(
+  p_requested_by => 'chatgpt',
+  p_resume_key => null
+);
+```
+
+Or pass a known `resumeKey` / `idempotency_key` as `p_resume_key`.
+
+The RPC returns the highest-priority resumable job:
+1. A job/result snapshot that still contains active tasks, subagents, or tools.
+2. Otherwise the newest `pending`, `claimed`, or `running` job.
+
+The response includes `job_id`, `conversation_id`, `resume_key`, `resume_title`,
+`status`, `snapshot_active`, `tasks`, `subagents`, and the latest response snapshot.
+
+If `found=true`, ChatGPT must resume observation of that same logical work instead of
+starting it again. A `completed` job with `snapshot_active=true` represents a historical
+premature-terminal snapshot and must still be treated as resumable/in-flight evidence.
+
+### Database terminal guard
+
+`public.complete_agent_job(...)` independently checks the supplied task/subagent/bot-tool
+snapshot. If any entry is still active, it persists the latest progress but leaves the job
+`running` and returns `false`; relay recovery then continues the same AGY conversation.
+This database guard protects against a relay-side or ChatGPT-side early-final decision.
+
+This means ending a ChatGPT turn, switching devices, or opening a new chat must not require
+replaying the underlying task.
