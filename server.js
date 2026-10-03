@@ -3083,6 +3083,16 @@ const server = http.createServer(async (req, res) => {
   // Status
   if (pathname === "/api/status" && req.method === "GET") {
     const maxCapacity = 5;
+
+    // Defensive cleanup: a stale child entry must never make bridge intake
+    // believe AGY is permanently full after the process has already exited.
+    for (const [convId, entry] of activeProcesses.entries()) {
+      const child = entry?.child;
+      if (!child || child.exitCode !== null || child.killed) {
+        activeProcesses.delete(convId);
+      }
+    }
+
     const activeCount = activeProcesses.size;
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({
