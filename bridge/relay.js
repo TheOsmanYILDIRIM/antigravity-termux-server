@@ -72,21 +72,13 @@ async function agy(method, path, body = undefined, timeoutMs = 30000) {
 }
 
 async function claimJob() {
-  let rows;
-  try {
-    rows = await rpc("claim_agent_job_wait", {
-      p_worker_id: cfg.workerId,
-      p_lease_seconds: cfg.leaseSeconds,
-      p_timeout_seconds: 25,
-      p_poll_interval_ms: 1000
-    });
-  } catch (e) {
-    // Backward-compatible fallback while database migration rolls out.
-    rows = await rpc("claim_agent_job", {
-      p_worker_id: cfg.workerId,
-      p_lease_seconds: cfg.leaseSeconds
-    });
-  }
+  // Supabase/PostgREST applies a statement timeout shorter than the legacy
+  // database long-poll window. Rely on the normal atomic claim RPC and let
+  // the relay's adaptive idle backoff control request frequency instead.
+  const rows = await rpc("claim_agent_job", {
+    p_worker_id: cfg.workerId,
+    p_lease_seconds: cfg.leaseSeconds
+  });
   return Array.isArray(rows) && rows.length ? rows[0] : null;
 }
 async function heartbeat(job) {
