@@ -156,7 +156,13 @@ begin
       )
     )
   order by
-    case when j.status in ('pending','claimed','running') then 0 else 1 end,
+    case
+      when private.agent_snapshot_has_active(
+        r.bot_message,coalesce(r.subagents,'[]'::jsonb),coalesce(r.tasks,'[]'::jsonb)
+      ) then 0
+      when j.status in ('pending','claimed','running') then 1
+      else 2
+    end,
     j.updated_at desc,
     j.created_at desc
   limit 1;
