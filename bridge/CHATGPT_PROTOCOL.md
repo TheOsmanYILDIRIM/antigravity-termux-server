@@ -290,3 +290,27 @@ This database guard protects against a relay-side or ChatGPT-side early-final de
 
 This means ending a ChatGPT turn, switching devices, or opening a new chat must not require
 replaying the underlying task.
+
+
+### Resuming a premature terminal snapshot
+
+If `find_resumable_agent_job(...)` returns `status="completed"` together with
+`snapshot_active=true`, do not merely report the stale state and do not replay the prompt.
+
+Call:
+
+```sql
+select public.resume_resumable_agent_job('<job-id>'::uuid);
+```
+
+The RPC is guarded: it only reopens a completed job whose persisted result still contains
+an active task/subagent/tool and whose existing `conversation_id`, worker ownership, and
+claim token are recoverable. It preserves the same job ID and conversation ID, marks the
+lease stale, and lets relay recovery reattach to that AGY conversation. It does not submit
+the original prompt again.
+
+After a successful response with `recovery_armed=true`, wait on the SAME job ID using
+`private.wait_agent_job`. Never create a replacement job for this case.
+
+`find_resumable_agent_job(...)` also exposes `resume_required` and `resume_action`
+so a new ChatGPT conversation does not need to infer this recovery step.
