@@ -265,7 +265,7 @@ create or replace function private.write_agent_result(
 language plpgsql
 security definer
 set search_path = private, public
-as $
+as $$
 begin
   insert into public.agent_results(job_id,conversation_id,response_text,bot_message,subagents,tasks,created_at)
   values(
@@ -289,7 +289,7 @@ begin
     p_job_id,p_conversation_id,p_response_text,p_bot_message,p_subagents,p_tasks,'bridge'
   );
 end;
-$;
+$$;
 
 grant execute on function private.write_agent_result(uuid,text,text,jsonb,jsonb,jsonb)
   to anon,service_role;
@@ -302,7 +302,7 @@ create or replace function public.find_resumable_agent_job(
 language plpgsql
 security invoker
 set search_path=public,private
-as $
+as $$
 declare
   v record;
 begin
@@ -389,7 +389,7 @@ begin
     'tasks',v.tasks
   );
 end;
-$;
+$$;
 
 revoke all on function public.find_resumable_agent_job(text,text) from public,authenticated;
 grant execute on function public.find_resumable_agent_job(text,text) to anon,service_role;
