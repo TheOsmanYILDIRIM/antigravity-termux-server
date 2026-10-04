@@ -588,7 +588,7 @@ async function runJob(job) {
       log("INFO", "job ownership lost or cancelled, skipping terminal failure write", { jobId: job.id });
       return;
     }
-    if (conversationId && !["AGY_ERROR", "AGY_STOPPED", "JOB_TIMEOUT", "EMPTY_FINAL_RESPONSE", "CHILD_EXITED_WITHOUT_RESULT"].includes(e.code)) {
+    if (conversationId && !["AGY_STOPPED", "JOB_TIMEOUT", "EMPTY_FINAL_RESPONSE", "CHILD_EXITED_WITHOUT_RESULT"].includes(e.code)) {
       try {
         await recoverRunning(job, conversationId, deadline);
         return;
