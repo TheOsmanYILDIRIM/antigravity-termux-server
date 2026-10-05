@@ -1,11 +1,14 @@
 name: Server Syntax & Bridge Checks
 
+concurrency:
+  group: server-quality-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
     branches:
       - main
       - feature/chatgpt-agent-bridge
-  pull_request:
   workflow_dispatch:
 
 permissions:
